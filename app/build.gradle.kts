@@ -77,7 +77,6 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
 
     // Coil (thumbnails)
-    implementation(libs.coil.compose)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

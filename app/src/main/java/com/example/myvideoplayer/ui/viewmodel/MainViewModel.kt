@@ -71,11 +71,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** 获取包含指定视频的播放列表ID集合（用于过滤已添加的列表） */
-    fun getExistingPlaylistIds(videoIds: List<Long>, cb: (Set<Long>) -> Unit) = viewModelScope.launch {
-        cb(repo.getPlaylistIdsContainingVideos(videoIds))
-    }
-
-    /** 同步版（在 LaunchedEffect 中调用） */
     suspend fun getExistingPlaylistIdsSync(videoIds: List<Long>): Set<Long> =
         repo.getPlaylistIdsContainingVideos(videoIds)
 

@@ -1,8 +1,10 @@
 package com.example.myvideoplayer.ui.viewmodel
 
 import android.app.Application
+import android.content.ContentResolver
 import android.content.Intent
 import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.myvideoplayer.AppContainer
@@ -27,23 +29,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** UI 提示消息 */
     private val _uiMessage = MutableSharedFlow<String>(); val uiMessage = _uiMessage.asSharedFlow()
 
-    /** 根文件夹名 -> SAF URI 映射，用于单文件夹刷新 */
-    private val _folderUris = mutableMapOf<String, Uri>()
-
     fun scanFolder(uri: Uri) = viewModelScope.launch {
         _isScanning.value = true
         try {
-            getApplication<Application>().contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            val (rootName, cnt) = repo.scanAndSaveFolder(getApplication(), uri)
-            _folderUris[rootName] = uri
+            val resolver = getApplication<Application>().contentResolver
+            resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val (_, cnt) = repo.scanAndSaveFolder(getApplication(), uri)
             _scanResult.emit(ScanResult.Success(cnt))
         } catch (e: Exception) { _scanResult.emit(ScanResult.Error(e.message ?: "失败")) }
         finally { _isScanning.value = false }
     }
 
-    /** 用已授权 URI 重新扫描单个文件夹（不会弹出 SAF 选择器） */
-    fun rescanFolder(name: String) {
-        _folderUris[name]?.let { scanFolder(it) }
+    /**
+     * 用已授权 URI 重新扫描单个文件夹（不会弹出 SAF 选择器）。
+     *
+     * 授权由系统持久化在 [ContentResolver.getPersistedUriPermissions] 里，
+     * 之前用内存 Map 记「文件夹名 -> URI」，进程重启后映射就空了，
+     * 单文件夹刷新会静默失效。这里直接向系统要当前的授权列表，
+     * 不引入额外存储也就不会与系统记录不一致。
+     */
+    fun rescanFolder(name: String) = viewModelScope.launch {
+        val uri = findPersistedUri(name) ?: run {
+            _uiMessage.emit("「$name」的访问授权已失效，请重新选择文件夹")
+            return@launch
+        }
+        scanFolder(uri)
+    }
+
+    /** 在系统持久化的授权里找根目录名匹配的那个 URI */
+    private fun findPersistedUri(rootName: String): Uri? {
+        val resolver = getApplication<Application>().contentResolver
+        return resolver.persistedUriPermissions
+            .firstOrNull { perm ->
+                perm.isReadPermission &&
+                    DocumentFile.fromTreeUri(getApplication(), perm.uri)?.name == rootName
+            }
+            ?.uri
     }
 
     fun createPlaylist(name: String, cb: (Boolean) -> Unit = {}) = viewModelScope.launch { try { repo.createPlaylist(name); cb(true) } catch (_: Exception) { cb(false) } }

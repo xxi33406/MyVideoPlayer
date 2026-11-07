@@ -41,10 +41,9 @@ object Routes {
 @Composable
 fun AppNavGraph() {
     val nav = rememberNavController()
-    // 作用域暂时保留在 Activity 级：切换路由不重建，避免列表页滚动位置与选中态丢失。
-    // PlayerViewModel 的生命周期治理见 P3-2。
+    // MainViewModel 承载扫描结果、选中态、待播列表等跨页状态，必须活在 Activity 级：
+    // 若随路由销毁，从详情页返回列表时选中与滚动会一起丢。
     val mvm: MainViewModel = viewModel()
-    val pvm: PlayerViewModel = viewModel()
 
     NavHost(navController = nav, startDestination = Routes.PLAYLIST_LIST) {
         composable(Routes.PLAYLIST_LIST) {
@@ -80,6 +79,10 @@ fun AppNavGraph() {
             arguments = listOf(navArgument(Routes.ARG_IDX) { type = NavType.IntType })
         ) { entry ->
             val index = entry.arguments?.getInt(Routes.ARG_IDX) ?: 0
+            // PlayerViewModel 跟随播放路由：进入时新建，返回栈弹出后随 NavBackStackEntry 一起
+            // onCleared，ExoPlayer 当场释放。此前挂在 Activity 级会让播放器实例活到进程结束，
+            // 反复进出播放页既不重建也不释放，白占解码器与内存。
+            val pvm: PlayerViewModel = viewModel()
             PlayerScreen(
                 viewModel = pvm,
                 mainViewModel = mvm,

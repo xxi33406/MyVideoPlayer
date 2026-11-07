@@ -14,7 +14,7 @@ import com.example.myvideoplayer.data.entity.VideoEntity
 @Database(
     entities = [PlaylistEntity::class, VideoEntity::class, PlaylistVideoCrossRef::class],
     version = 4,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun playlistDao(): PlaylistDao
@@ -22,22 +22,23 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun playlistVideoDao(): PlaylistVideoDao
 
     companion object {
+        private const val DB_NAME = "video_player.db"
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
-                    context.applicationContext,
-                    AppDatabase::class.java,
-                    "video_player.db"
-                )
-                    .fallbackToDestructiveMigration()
-                    .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                    .build()
-                INSTANCE = instance
-                instance
+                INSTANCE ?: build(context).also { INSTANCE = it }
             }
         }
+
+        private fun build(context: Context): AppDatabase =
+            Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, DB_NAME)
+                // 显式登记迁移，不再 fallbackToDestructiveMigration：
+                // 后者遇到版本变化会直接删库重建，扫描结果与播放列表全丢。
+                .addMigrations(*DatabaseMigrations.ALL)
+                .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                .build()
     }
 }

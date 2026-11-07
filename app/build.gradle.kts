@@ -40,6 +40,10 @@ android {
     buildFeatures {
         compose = true
     }
+    ksp {
+        // 导出 Room schema 到 app/schemas/，为后续迁移留下可核对的基准 JSON
+        arg("room.schemaLocation", "$projectDir/schemas")
+    }
 }
 
 dependencies {
@@ -75,8 +79,6 @@ dependencies {
 
     // Material Icons Extended
     implementation(libs.androidx.compose.material.icons.extended)
-
-    // Coil (thumbnails)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

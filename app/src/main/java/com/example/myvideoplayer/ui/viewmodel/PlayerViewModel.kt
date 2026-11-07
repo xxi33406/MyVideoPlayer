@@ -12,8 +12,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import com.example.myvideoplayer.AppContainer
 import com.example.myvideoplayer.data.entity.VideoEntity
-import com.example.myvideoplayer.data.repository.VideoRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -23,7 +23,7 @@ import kotlinx.coroutines.launch
  */
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = VideoRepository(application)
+    private val repository = AppContainer.of(application).videoRepository
 
     /** ExoPlayer 实例 */
     var exoPlayer: ExoPlayer? = null

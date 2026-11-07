@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.myvideoplayer.AppContainer
 import com.example.myvideoplayer.data.entity.PlaylistEntity
 import com.example.myvideoplayer.data.entity.VideoEntity
 import com.example.myvideoplayer.data.repository.VideoRepository
@@ -13,7 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    private val repo = VideoRepository(application)
+    private val repo: VideoRepository = AppContainer.of(application).videoRepository
 
     val allVideos: StateFlow<List<VideoEntity>> = repo.getAllVideos().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val playlists: StateFlow<List<PlaylistEntity>> = repo.getAllPlaylists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

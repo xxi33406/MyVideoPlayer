@@ -5,6 +5,14 @@
     <!-- 网络权限（m3u8 流需要） -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+        播放期间持有 CPU 唤醒锁（ExoPlayer.setWakeMode）。
+        缺这条权限时 ExoPlayer 会在 setWakeMode 处抛 SecurityException：
+        "Neither user XXX nor current process has android.permission.WAKE_LOCK"，
+        表现为点任何视频都立即失败。
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- Android 13+ 视频读取权限 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 

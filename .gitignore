@@ -8,3 +8,7 @@
 .externalNativeBuild
 .cxx
 .DS_Store
+
+# 文档不纳入版本库（仅保留在本地）
+/docs
+/AGENTS.md

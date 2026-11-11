@@ -6,11 +6,13 @@ import android.util.Log
 import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.example.myvideoplayer.AppContainer
@@ -80,10 +82,22 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val dataSourceFactory = DefaultDataSource.Factory(app)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
-        exoPlayer = ExoPlayer.Builder(app)
+        // 解码器兜底：默认关闭。遇到不支持的编码时 ExoPlayer 会直接抛
+        // DecoderInitializationException，而不是尝试别的解码器（含软解）。
+        // 打开的代价是极端情况下多一次初始化，换来的是少一次"这个视频打不开"。
+        val renderersFactory = DefaultRenderersFactory(app)
+            .setEnableDecoderFallback(true)
+
+        exoPlayer = ExoPlayer.Builder(app, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .build()
             .apply {
+                // 播放期间需要持有 CPU 唤醒锁。不设的话系统在息屏/低电时可以挂起进程，
+                // 表现为音频断续、画面卡住然后被反复唤醒重试——比正常播放更费电。
+                setWakeMode(C.WAKE_MODE_NETWORK)
+                // 拔耳机/断蓝牙时自动暂停。原来会继续用扬声器外放，既扰人又费电。
+                setHandleAudioBecomingNoisy(true)
+
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         _isPlaying.value = isPlaying

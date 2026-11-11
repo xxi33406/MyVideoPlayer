@@ -1,58 +1,75 @@
 package com.example.myvideoplayer.ui.screen
 
 import android.app.Activity
-import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.media.AudioManager
-import android.util.Log
-import android.view.ViewGroup
-import android.view.WindowManager
-import android.widget.FrameLayout
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
-import com.example.myvideoplayer.data.entity.PlaylistEntity
 import com.example.myvideoplayer.data.entity.VideoEntity
-import com.example.myvideoplayer.ui.viewmodel.LoopMode
+import com.example.myvideoplayer.ui.screen.player.AddToPlaylistDialog
+import com.example.myvideoplayer.ui.screen.player.CenterPlayButton
+import com.example.myvideoplayer.ui.screen.player.PlayerBottomBar
+import com.example.myvideoplayer.ui.screen.player.PlayerContent
+import com.example.myvideoplayer.ui.screen.player.PlayerErrorOverlay
+import com.example.myvideoplayer.ui.screen.player.PlayerLifecycleEffects
+import com.example.myvideoplayer.ui.screen.player.PlayerSidebar
+import com.example.myvideoplayer.ui.screen.player.PlayerTitleOverlay
+import com.example.myvideoplayer.ui.screen.player.SeekPreviewOverlay
+import com.example.myvideoplayer.ui.screen.player.SpeedHud
+import com.example.myvideoplayer.ui.screen.player.VolumeOverlay
 import com.example.myvideoplayer.ui.viewmodel.MainViewModel
 import com.example.myvideoplayer.ui.viewmodel.PlayerViewModel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.roundToInt
 
+/**
+ * 播放页。这个文件只做三件事：**订阅状态、编排子组件、处理用户意图**。
+ *
+ * | 关注点 | 位置 |
+ * |---|---|
+ * | 画面与两套手势 | player/PlayerContent.kt |
+ * | 浮层（标题/倍速/快进/音量/暂停/错误） | player/PlayerOverlays.kt |
+ * | 底部控制条（进度订阅隔离在这里） | player/PlayerBottomBar.kt |
+ * | 右侧播放列表侧栏 | player/PlayerSidebar.kt |
+ * | 加入播放列表对话框 | player/AddToPlaylistDialog.kt |
+ * | 方向/常亮/轮询/后台暂停 | player/PlayerLifecycleEffects.kt |
+ * | 时间与倍速格式化 | player/PlayerFormat.kt |
+ *
+ * 拆分动机：原来 601 行里同时住着两套手势检测器、六个浮层、一个 LazyColumn
+ * 侧栏、一个对话框、方向切换、屏幕常亮、后台暂停、进度轮询 —— 改任何一个
+ * 功能都要先在这个文件里重建一遍上下文。最直接的代价是上次排查"退出后仍
+ * 横屏"时，方向复位那句藏在 onDispose 的第二个语句位置，一眼看不见它会被
+ * 前面的异常跳过。
+ */
 @Composable
 fun PlayerScreen(
     viewModel: PlayerViewModel,
@@ -61,381 +78,135 @@ fun PlayerScreen(
     startIndex: Int,
     onBack: () -> Unit
 ) {
+    // 只订阅"会改变布局结构"的状态。currentPosition / duration 刻意不在这里收，
+    // 它们每 500ms 变一次，在这一层订阅等于让整个播放页全量重组（见 PlayerBottomBar）。
     val isPlaying by viewModel.isPlaying.collectAsState()
     val loopMode by viewModel.loopMode.collectAsState()
     val isFastForward by viewModel.isFastForward.collectAsState()
-    // 倍速只有 ViewModel 一份状态：原来 UI 里还有一份 currentSpeed，
-    // 长按调速时两个一起改，谁也不知道以谁为准，HUD 显示与实际播放速度可能不一致。
+    // 倍速只有 ViewModel 一份状态：原来 UI 里还有一份 currentSpeed，长按调速时
+    // 两个一起改，谁也不知道以谁为准，HUD 显示与实际播放速度可能不一致。
     val currentSpeed by viewModel.playbackSpeed.collectAsState()
     val currentIndex by viewModel.currentIndex.collectAsState()
     val playlist by viewModel.playlist.collectAsState()
     val allPlaylists by mainViewModel.playlists.collectAsState()
     val playerError by viewModel.playerError.collectAsState()
 
-    // 刻意不在这一层收集 currentPosition / duration。
-    // 进度每 500ms 变一次，在这一层订阅等于让整个播放页（PlayerView、两套手势、
-    // 五个 AnimatedVisibility、侧栏 LazyColumn）跟着每 500ms 全量重组一次。
-    // 真正需要进度的只有底部控制条，它自己收集（见 PlayerBottomBar）。
-
     var showControls by remember { mutableStateOf(true) }
     var showSpeedIndicator by remember { mutableStateOf(false) }
     var showVolIndicator by remember { mutableStateOf(false) }
-    var volLevel by remember { mutableIntStateOf(0) }
     var showSeekPreview by remember { mutableStateOf(false) }
     var seekTargetMs by remember { mutableLongStateOf(0L) }
     var showSidebar by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
-    val snackbarHostState = remember { SnackbarHostState() }
-    // 已包含当前视频的播放列表ID（用于过滤添加对话框）
     var existingPlaylistIds by remember { mutableStateOf(emptySet<Long>()) }
-    val density = LocalDensity.current
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
+    val context = LocalContext.current
     val audioManager = context.getSystemService(AudioManager::class.java)
-    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-    var volume by remember { mutableIntStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)) }
+    val maxVolume = remember(audioManager) {
+        audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    }
+    var volume by remember {
+        mutableIntStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+    }
     val currentVideoName = videos.getOrNull(currentIndex)?.name ?: ""
 
-    var lastTapTime by remember { mutableLongStateOf(0L) }
+    // 方向、屏幕常亮、进度轮询、后台暂停，全部在另一个文件里
+    PlayerLifecycleEffects(
+        viewModel = viewModel,
+        isPlaying = isPlaying,
+        isFastForward = isFastForward,
+        showControls = showControls,
+        showVolIndicator = showVolIndicator,
+        onHideControls = { showControls = false },
+        onHideVolumeIndicator = { showVolIndicator = false }
+    )
 
-    // 手势 lambda 里需要读到"最新"的进度与时长，但不能为了它们订阅 StateFlow
-    // （那会把整页拉进每 500ms 的重组）。StateFlow.value 是线程安全的即时快照，
-    // 在拖动开始的那一刻读一次就够用了。
-    fun latestPosition(): Long = viewModel.currentPosition.value
-    fun latestDuration(): Long = viewModel.duration.value
-
-    val activity = context as Activity
-    DisposableEffect(Unit) {
-        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        onDispose {
-            // 方向复位必须放在最前，且与 stop() 互相独立：
-            // 原来写成 onDispose { viewModel.stop(); requestedOrientation = PORTRAIT }，
-            // 一旦 stop() 抛异常（播放器已 release），方向复位这句就永远执行不到，
-            // 表现就是"退出播放页后仍停在横屏"。
-            runCatching { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
-                .onFailure { Log.w("PlayerScreen", "方向复位失败", it) }
-            // 退出前把进度落盘：进度循环有 5 秒节流，不补这一次会丢掉最后几秒
-            viewModel.savePositionNow()
-            viewModel.stop()
-        }
-    }
-
-    LaunchedEffect(showControls, isPlaying, isFastForward) {
-        if (showControls && isPlaying && !isFastForward) { delay(3000); showControls = false }
-    }
-
-    // 播放中保持屏幕常亮，暂停 30 秒后释放。
-    // 直接用 window 的 FLAG_KEEP_SCREEN_ON 而不是 Modifier 上的 keepScreenOn：
-    // 这里需要"暂停后延迟 30 秒再释放"，Modifier 那套只有布尔开关，
-    // 用户暂停去看一眼消息回来，屏幕不该已经黑了。
-    DisposableEffect(isPlaying) {
-        if (isPlaying) {
-            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            onDispose { activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-        } else {
-            // 暂停后先继续保持常亮 30 秒，超时才允许息屏
-            val keepAliveJob = scope.launch {
-                delay(30_000)
-                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            }
-            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            onDispose {
-                keepAliveJob.cancel()
-                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            }
-        }
-    }
     LaunchedEffect(videos) {
         if (videos.isNotEmpty()) viewModel.setPlaylist(videos, startIndex)
     }
-    // 仅播放时更新进度，且只在页面可见（RESUMED）时跑。
-    // 原来只判断 isPlaying：切到后台后 Composable 仍在组合中，这个 while 循环
-    // 会继续每 500ms 唤醒一次 CPU，是"后台耗电"的直接来源。
-    val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(isPlaying, lifecycleOwner) {
-        if (isPlaying) {
-            try {
-                lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                    while (true) {
-                        viewModel.updatePosition()
-                        delay(500)
-                    }
-                }
-            } finally {
-                // 切后台或暂停都会退出上面的循环，补一次落盘，
-                // 否则续播点会落后最多 5 秒（节流窗口）。
-                viewModel.savePositionNow()
-            }
-        }
-    }
 
-    // 切到后台时暂停播放。
-    // 上面那段只停掉了 UI 的进度轮询，播放器本身仍在全速解码：
-    // 实测切后台 30 秒 CPU 时间增加 9.17 秒（约 30%），top -H 显示
-    // MediaCodec_loop 11.1% + ExoPlayer:PlaybackThread 7.4%，也就是说
-    // 用户看不到画面，解码器却在满负荷跑 —— 这是最费电的一种后台状态。
-    // 暂停而不是 stop()：保留 MediaItem 与进度，切回来自动接上（P2-1 的
-    // MediaSession + Service 做完之后，这里会改成交给 Service 继续播）。
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_STOP -> {
-                    if (viewModel.isPlaying.value) {
-                        viewModel.savePositionNow()
-                        viewModel.pauseForBackground()
-                    }
-                }
-                // 切回前台接着播，否则用户回来后看到的是停住的画面
-                Lifecycle.Event.ON_START -> viewModel.resumeFromBackground()
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    LaunchedEffect(Unit) {
+        mainViewModel.uiMessage.collect { snackbarHostState.showSnackbar(it) }
     }
-
-    LaunchedEffect(showVolIndicator) {
-        if (showVolIndicator) {
-            delay(800)
-            showVolIndicator = false
-        }
-    }
-
-    // 收集添加提示消息
-    LaunchedEffect(Unit) { mainViewModel.uiMessage.collect { snackbarHostState.showSnackbar(it) } }
 
     // 打开添加对话框时查询已包含当前视频的播放列表
     LaunchedEffect(showAddDialog) {
         if (showAddDialog) {
-            val v = videos.getOrNull(currentIndex)
-            if (v != null) existingPlaylistIds = mainViewModel.getExistingPlaylistIdsSync(listOf(v.id))
+            videos.getOrNull(currentIndex)?.let { video ->
+                existingPlaylistIds = mainViewModel.getExistingPlaylistIdsSync(listOf(video.id))
+            }
         }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // 视频播放器
-        // 关键：必须有 update 块。factory 只在首次组合时执行一次，写进去的
-        // `player = viewModel.exoPlayer` 会把 PlayerView 永久绑死在"那一刻"的 ExoPlayer 实例上。
-        // P3 把 PlayerViewModel 收束到播放路由后，ExoPlayer 会随路由销毁重建，
-        // 而 PlayerView 仍指向已 release 的旧实例：画面停在最后一帧不动，
-        // 且旧 PlayerView 处于失效状态会吞掉触摸事件，表现为"所有按键手势都失效"。
-        AndroidView(
-            factory = { ctx ->
-                androidx.media3.ui.PlayerView(ctx).apply {
-                    useController = false
-                    layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                }
+        PlayerContent(
+            viewModel = viewModel,
+            volume = volume,
+            onVolumeChange = { volume = it },
+            onVolumeTouched = { showVolIndicator = true },
+            onSeekPreview = { target, visible ->
+                seekTargetMs = target
+                showSeekPreview = visible
             },
-            update = { playerView -> playerView.player = viewModel.exoPlayer },
-            modifier = Modifier.fillMaxSize()
-                // 主区域：横滑快进 + 倍速 + 单击/双击（排除右 20% 音量区）
-                // key 只留 density：原来把 duration 也当 key，视频时长从 0 变成真实值时
-                // 会重建整个手势检测器，正在进行的拖动会被打断（松手前手势凭空消失）。
-                // duration 的实时值改由 rememberUpdatedState 读取。
-                .pointerInput(density) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val startX = down.position.x; val startY = down.position.y
-                        val w = size.width.toFloat()
-                        if (startX > w * 0.8f) return@awaitEachGesture  // 跳过音量区
-                        down.consume()
-
-                        var isSeek = false; var isLong = false; var seekDelta = 0f
-                        val result = withTimeoutOrNull(500L) {
-                            // 等待期间检测横滑
-                            while (true) {
-                                val ev = awaitPointerEvent()
-                                val ch = ev.changes.firstOrNull() ?: break
-                                if (ch.changedToUp()) { ch.consume(); break }
-                                val dx = ch.position.x - startX
-                                if (kotlin.math.abs(dx) > 30f && !isLong) {
-                                    isSeek = true; seekDelta = dx
-                                    // 显示快进预览
-                                    val dpDx = with(density) { dx.toDp().value }
-                                    val seekMs = (latestPosition() + (dpDx * 1000).toLong()).coerceIn(0, latestDuration())
-                                    seekTargetMs = seekMs; showSeekPreview = true
-                                }
-                            }
-                        }
-
-                        if (isSeek) {
-                            // 横滑快进：执行 seek
-                            viewModel.seekTo(seekTargetMs); showSeekPreview = false
-                        } else if (result == null) {
-                            // 长按：倍速模式。
-                            // 走 ViewModel 的 startFastForward/stopFastForward，不再直接 setSpeed：
-                            // 只有经过这一对方法，isFastForward 才会被正确置位，控制条的
-                            // "长按期间不自动隐藏" 逻辑才有判断依据。
-                            viewModel.startFastForward()
-                            showSpeedIndicator = true
-                            try {
-                                while (true) {
-                                    val ev = awaitPointerEvent(); val ch = ev.changes.firstOrNull() ?: break
-                                    if (ch.changedToUp()) { ch.consume(); break }
-                                    val dy = startY - ch.position.y
-                                    val dpDy = with(density) { dy.toDp().value }
-                                    val raw = 3f + (dpDy / 20f) * 0.5f
-                                    val speed = ((raw.coerceIn(2f, 5f) * 2f).roundToInt() / 2f).toFloat().coerceIn(2f, 5f)
-                                    viewModel.setSpeed(speed)
-                                }
-                            } finally {
-                                showSpeedIndicator = false; viewModel.stopFastForward()
-                            }
-                        } else {
-                            val now = System.currentTimeMillis()
-                            if (now - lastTapTime < 350) {
-                                viewModel.playPause(); lastTapTime = 0L
-                            } else {
-                                showControls = !showControls; lastTapTime = now
-                            }
-                        }
-                    }
-                }
-                // 右侧 20% 区域：音量调节
-                .pointerInput(maxVolume) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val x = down.position.x; val w = size.width.toFloat()
-                        if (x < w * 0.8f) return@awaitEachGesture  // 只处理右侧
-                        down.consume()
-                        val initVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                        var moved = false
-                        try {
-                            while (true) {
-                                val ev = awaitPointerEvent(); val ch = ev.changes.firstOrNull() ?: break
-                                if (ch.changedToUp()) { ch.consume(); break }
-                                val dy = ch.position.y - ch.previousPosition.y
-                                val newV = (volume - (dy / 20f).roundToInt()).coerceIn(0, maxVolume)
-                                if (newV != volume) {
-                                    volume = newV; volLevel = newV; moved = true
-                                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newV, 0)
-                                    showVolIndicator = true
-                                }
-                            }
-                        } finally {
-                            // 松手后不立即隐藏，通过 LaunchedEffect 延迟隐藏
-                            if (moved) showVolIndicator = true
-                        }
-                    }
-                }
+            onSpeedIndicatorChange = { showSpeedIndicator = it },
+            onToggleControls = { showControls = !showControls }
         )
 
-        // 视频名（顶部）
-        androidx.compose.animation.AnimatedVisibility(
+        PlayerTitleOverlay(
             visible = showControls,
-            enter = fadeIn() + slideInVertically { -it },
-            exit = fadeOut() + slideOutVertically { -it },
+            title = currentVideoName,
             modifier = Modifier.align(Alignment.TopCenter)
-        ) {
-            Box(Modifier.fillMaxWidth().background(Color.Black.copy(0.65f)).padding(horizontal = 56.dp, vertical = 12.dp)) {
-                Text(currentVideoName, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.Center))
-            }
-        }
+        )
 
-        // 倍速 HUD：画面右侧中部，竖排刻度 + 当前倍速。
-        // 原来放在左上角，32sp 裸数字（整数时 formatSpeed 返回 "3" 而不是 "3x"）
-        // 还常驻一行 11sp 的「上下滑调速」，等于把调试信息压在画面上，
-        // 看视频时视线每次都会被它拽走。现在改成靠右侧边缘的轻量刻度，
-        // 遮挡感更低，且松手即消失。
-        androidx.compose.animation.AnimatedVisibility(
+        SpeedHud(
             visible = showSpeedIndicator,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            speed = currentSpeed,
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 24.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // 竖排刻度：5 档，当前档位高亮
-                Column(
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    listOf(5f, 4f, 3f, 2f, 1f).forEach { tick ->
-                        val active = kotlin.math.abs(currentSpeed - tick) < 0.25f
-                        Box(
-                            Modifier
-                                .width(if (active) 22.dp else 12.dp)
-                                .height(if (active) 3.dp else 2.dp)
-                                .background(
-                                    if (active) Color.White else Color.White.copy(0.35f),
-                                    RoundedCornerShape(2.dp)
-                                )
-                        )
-                    }
-                }
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    formatSpeed(currentSpeed),
-                    color = Color.White,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-        }
+        )
 
-        // 横滑快进预览
-        androidx.compose.animation.AnimatedVisibility(
+        SeekPreviewOverlay(
             visible = showSeekPreview,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            targetMs = seekTargetMs,
             modifier = Modifier.align(Alignment.Center)
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(formatTime(seekTargetMs), color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                Text("← 拖动快进 →", color = Color.White.copy(0.6f), fontSize = 12.sp)
-            }
-        }
+        )
 
         // 左上返回
-        IconButton(onClick = { viewModel.stop(); onBack() }, modifier = Modifier.align(Alignment.TopStart).padding(8.dp).background(Color.Black.copy(0.5f), CircleShape)) {
+        IconButton(
+            onClick = { viewModel.stop(); onBack() },
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(8.dp)
+                .background(Color.Black.copy(0.5f), CircleShape)
+        ) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color.White)
         }
 
         // 右上加入列表
-        IconButton(onClick = { showAddDialog = true }, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).background(Color.Black.copy(0.5f), CircleShape)) {
+        IconButton(
+            onClick = { showAddDialog = true },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+                .background(Color.Black.copy(0.5f), CircleShape)
+        ) {
             Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "加入列表", tint = Color.White)
         }
 
-        // 音量提示——调节时显示
-        androidx.compose.animation.AnimatedVisibility(
+        VolumeOverlay(
             visible = showVolIndicator,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            level = volume,
+            maxLevel = maxVolume,
             modifier = Modifier.align(Alignment.CenterEnd)
-        ) {
-            Box(Modifier
-                .padding(end = 8.dp)
-                .background(Color.Black.copy(0.7f), RoundedCornerShape(8.dp))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.AutoMirrored.Filled.VolumeUp, null, tint = Color.White, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    // 音量条
-                    val frac = if (maxVolume > 0) volLevel.toFloat() / maxVolume else 0f
-                    Box(Modifier.width(60.dp).height(6.dp).background(Color.White.copy(0.3f), RoundedCornerShape(3.dp))) {
-                        Box(Modifier.width((60 * frac).dp).height(6.dp).background(Color.White, RoundedCornerShape(3.dp)))
-                    }
-                }
-            }
-        }
+        )
 
-        // 暂停大按钮
-        androidx.compose.animation.AnimatedVisibility(
+        CenterPlayButton(
             visible = showControls && !isPlaying,
-            enter = fadeIn() + scaleIn(),
-            exit = fadeOut() + scaleOut(),
+            onPlay = { viewModel.playPause() },
             modifier = Modifier.align(Alignment.Center)
-        ) {
-            IconButton(onClick = { viewModel.playPause() }, modifier = Modifier.size(72.dp).background(Color.White.copy(0.3f), CircleShape)) {
-                Icon(Icons.Filled.PlayArrow, "播放", tint = Color.White, modifier = Modifier.size(48.dp))
-            }
-        }
+        )
 
-        // 底部控制
-        androidx.compose.animation.AnimatedVisibility(
+        AnimatedVisibility(
             visible = showControls,
             enter = slideInVertically { it },
             exit = slideOutVertically { it },
@@ -450,152 +221,54 @@ fun PlayerScreen(
             )
         }
 
-        // 右侧侧栏
-        androidx.compose.animation.AnimatedVisibility(
+        AnimatedVisibility(
             visible = showSidebar,
             enter = slideInHorizontally { it },
             exit = slideOutHorizontally { it },
-            modifier = Modifier.align(Alignment.CenterEnd).width(140.dp).fillMaxHeight()
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .width(140.dp)
+                .fillMaxHeight()
         ) {
-            Column(Modifier.fillMaxSize().background(Color.Black.copy(0.9f)).padding(8.dp)) {
-                Text("播放列表", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Spacer(Modifier.height(8.dp))
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    itemsIndexed(playlist) { idx, video ->
-                        val isCur = idx == currentIndex
-                        Box(Modifier.fillMaxWidth().height(65.dp).clip(RoundedCornerShape(8.dp))
-                            .background(if (isCur) Color.White.copy(0.2f) else Color.White.copy(0.08f))
-                            .clickable { viewModel.playVideoAt(idx); showSidebar = false }
-                            .padding(6.dp), contentAlignment = Alignment.CenterStart) {
-                            Text(video.name, color = if (isCur) Color.White else Color.White.copy(0.7f),
-                                maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 11.sp,
-                                fontWeight = if (isCur) FontWeight.Bold else FontWeight.Normal)
-                        }
-                    }
+            PlayerSidebar(
+                playlist = playlist,
+                currentIndex = currentIndex,
+                onPlayAt = { idx ->
+                    viewModel.playVideoAt(idx)
+                    showSidebar = false
                 }
-            }
+            )
         }
-        // 添加提示
-        SnackbarHost(snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp))
 
-        // 播放错误提示
-        // playerError 此前只在 ViewModel 里写、全项目无人读，播放失败时用户看到的
-        // 就是一整块纯黑画面 + 点了没反应的按钮，看起来和"手势全失效"一模一样。
-        AnimatedVisibility(
-            visible = playerError != null,
-            enter = fadeIn(),
-            exit = fadeOut(),
+        SnackbarHost(
+            snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp)
+        )
+
+        PlayerErrorOverlay(
+            message = playerError,
+            onDismiss = { viewModel.clearError() },
             modifier = Modifier.align(Alignment.Center)
-        ) {
-            Box(
-                Modifier
-                    .padding(32.dp)
-                    .background(Color.Black.copy(0.85f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 20.dp, vertical = 16.dp)
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Warning, null, tint = Color(0xFFFFB74D), modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("播放失败", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        playerError.orEmpty(),
-                        color = Color.White.copy(0.75f),
-                        fontSize = 12.sp,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    TextButton(onClick = { viewModel.clearError() }) {
-                        Text("知道了", color = Color.White)
-                    }
-                }
-            }
-        }
+        )
     }
 
-    // 加入播放列表对话框
     if (showAddDialog && currentVideoName.isNotEmpty()) {
-        val available = allPlaylists.filterNot { it.id in existingPlaylistIds }
-        AlertDialog(
-            onDismissRequest = { showAddDialog = false },
-            title = { Text("加入播放列表") },
-            text = {
-                Column {
-                    Text(currentVideoName, fontSize = 12.sp, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(8.dp))
-                    if (allPlaylists.isEmpty()) Text("暂无播放列表")
-                    else if (available.isEmpty()) Text("该视频已在所有播放列表中")
-                    else LazyColumn {
-                        items(available) { pl ->
-                            TextButton(onClick = {
-                                videos.getOrNull(currentIndex)?.let {
-                                    mainViewModel.addVideosToPlaylist(listOf(it.id), pl.id, pl.name)
-                                    existingPlaylistIds = existingPlaylistIds + pl.id  // 立即从UI移除
-                                }
-                                showAddDialog = false
-                            }, modifier = Modifier.fillMaxWidth()) {
-                                Text(pl.name)
-                            }
-                        }
-                    }
+        AddToPlaylistDialog(
+            videoName = currentVideoName,
+            allPlaylists = allPlaylists,
+            available = allPlaylists.filterNot { it.id in existingPlaylistIds },
+            onPick = { playlistEntity ->
+                videos.getOrNull(currentIndex)?.let { video ->
+                    mainViewModel.addVideosToPlaylist(
+                        listOf(video.id),
+                        playlistEntity.id,
+                        playlistEntity.name
+                    )
+                    existingPlaylistIds = existingPlaylistIds + playlistEntity.id
                 }
+                showAddDialog = false
             },
-            confirmButton = { TextButton(onClick = { showAddDialog = false }) { Text("关闭") } }
+            onDismiss = { showAddDialog = false }
         )
     }
 }
-
-/**
- * 底部控制条：进度滑块 + 时间 + 五个播放控制按钮。
- *
- * 单独抽出来的唯一原因是**进度订阅的隔离**。currentPosition / duration 每 500ms
- * 变一次，如果在 PlayerScreen 顶层 collect，整个播放页（PlayerView、两套手势检测器、
- * 五个 AnimatedVisibility、侧栏 LazyColumn）会跟着全量重组。让这两个 StateFlow 只在
- * 这个函数体内被收集，重组范围就被限制在 Slider 和两个 Text 上。
- */
-@Composable
-private fun PlayerBottomBar(
-    viewModel: PlayerViewModel,
-    isPlaying: Boolean,
-    loopMode: LoopMode,
-    sidebarOpen: Boolean,
-    onToggleSidebar: () -> Unit
-) {
-    val currentPosition by viewModel.currentPosition.collectAsState()
-    val duration by viewModel.duration.collectAsState()
-
-    Column(Modifier.fillMaxWidth().background(Color.Black.copy(0.75f)).padding(horizontal = 16.dp, vertical = 8.dp)) {
-        val p = if (duration > 0) currentPosition.toFloat() / duration else 0f
-        Slider(p, { viewModel.seekTo((it * duration).toLong()) }, Modifier.fillMaxWidth(),
-            colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(0.3f)))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatTime(currentPosition), color = Color.White, fontSize = 12.sp)
-            Text(formatTime(duration), color = Color.White, fontSize = 12.sp)
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { viewModel.toggleLoopMode() }) {
-                Icon(if (loopMode == LoopMode.PLAYLIST) Icons.Filled.Repeat else Icons.Filled.RepeatOne, null, tint = Color.White)
-            }
-            IconButton(onClick = { viewModel.previous() }) { Icon(Icons.Filled.SkipPrevious, "上一集", tint = Color.White) }
-            IconButton(onClick = { viewModel.playPause() }, modifier = Modifier.size(52.dp).background(Color.White.copy(0.2f), CircleShape)) {
-                Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(30.dp))
-            }
-            IconButton(onClick = { viewModel.next() }) { Icon(Icons.Filled.SkipNext, "下一集", tint = Color.White) }
-            IconButton(onClick = onToggleSidebar) {
-                Icon(Icons.Filled.Menu, "列表", tint = if (sidebarOpen) Color.White else Color.White.copy(0.6f))
-            }
-        }
-    }
-}
-
-private fun formatTime(ms: Long): String = "%02d:%02d".format((ms / 1000).toInt() / 60, (ms / 1000).toInt() % 60)
-/**
- * 倍速文本。统一保留一位小数并带 x 后缀：
- * 原来整数倍速返回 "3"（不带单位），屏幕上孤零零一个数字，
- * 不看上下文根本不知道那是倍速。
- */
-private fun formatSpeed(s: Float): String = String.format(java.util.Locale.US, "%.1fx", s)

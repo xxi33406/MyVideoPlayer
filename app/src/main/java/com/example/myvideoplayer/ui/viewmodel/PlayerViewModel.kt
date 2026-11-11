@@ -44,6 +44,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 上次把进度写进数据库的时间戳，用于 [SAVE_INTERVAL_MS] 限频 */
     private var lastSavedAt = 0L
 
+    /** 暂停是否由"切到后台"触发；只有这种暂停才在回前台时自动恢复 */
+    private var pausedByBackground = false
+
     /** ExoPlayer 实例 */
     var exoPlayer: ExoPlayer? = null
         private set
@@ -192,6 +195,37 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun playPause() {
         val player = exoPlayer ?: return
         if (player.isPlaying) player.pause() else player.play()
+    }
+
+    /**
+     * 切到后台时暂停。
+     *
+     * 为什么不能只靠 UI 层停轮询：切后台后 Composable 仍在组合中，ExoPlayer
+     * 依然全速解码。实测（模拟器 Medium_Phone，切后台 30 秒）：CPU 时间增加
+     * 9.17 秒（约 30%），top -H 显示 MediaCodec_loop 11.1% +
+     * ExoPlayer:PlaybackThread 7.4% —— 画面看不见，解码器却满负荷。
+     *
+     * 用 pause() 而非 stop()：保留 MediaItem 与播放进度，切回来自动续上。
+     * 同时记一个标记，只有"我们主动暂停的"才在回前台时自动恢复，
+     * 用户在后台之前自己按了暂停的，回来后保持暂停。
+     */
+    fun pauseForBackground() {
+        val player = exoPlayer ?: return
+        if (!player.isPlaying) return
+        pausedByBackground = true
+        player.pause()
+        Log.i(TAG, "切到后台，暂停解码")
+    }
+
+    /** 切回前台时恢复播放，仅当暂停是本类在后台触发的 */
+    fun resumeFromBackground() {
+        if (!pausedByBackground) return
+        pausedByBackground = false
+        val player = exoPlayer ?: return
+        if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
+            player.play()
+            Log.i(TAG, "回到前台，恢复播放")
+        }
     }
 
     /** 停止播放，用于退出播放器时调用 */

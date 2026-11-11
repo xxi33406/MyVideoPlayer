@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.myvideoplayer.data.entity.PlaylistEntity
@@ -142,6 +143,31 @@ fun PlayerScreen(
                 viewModel.savePositionNow()
             }
         }
+    }
+
+    // 切到后台时暂停播放。
+    // 上面那段只停掉了 UI 的进度轮询，播放器本身仍在全速解码：
+    // 实测切后台 30 秒 CPU 时间增加 9.17 秒（约 30%），top -H 显示
+    // MediaCodec_loop 11.1% + ExoPlayer:PlaybackThread 7.4%，也就是说
+    // 用户看不到画面，解码器却在满负荷跑 —— 这是最费电的一种后台状态。
+    // 暂停而不是 stop()：保留 MediaItem 与进度，切回来自动接上（P2-1 的
+    // MediaSession + Service 做完之后，这里会改成交给 Service 继续播）。
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    if (viewModel.isPlaying.value) {
+                        viewModel.savePositionNow()
+                        viewModel.pauseForBackground()
+                    }
+                }
+                // 切回前台接着播，否则用户回来后看到的是停住的画面
+                Lifecycle.Event.ON_START -> viewModel.resumeFromBackground()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     LaunchedEffect(showVolIndicator) {

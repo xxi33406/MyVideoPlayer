@@ -63,6 +63,10 @@ dependencies {
 
     // Media3
     implementation(libs.media3.exoplayer)
+    // HLS：FileScanner 会把 .m3u8 收进库，但 DefaultMediaSourceFactory 在缺少本模块时
+    // 会抛 "No suitable media source factory found for content type: 2"（2 = HLS），
+    // 结果是 m3u8 一定播不了。补上这个模块才与扫描器的扩展名清单自洽。
+    implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
 
     // Navigation

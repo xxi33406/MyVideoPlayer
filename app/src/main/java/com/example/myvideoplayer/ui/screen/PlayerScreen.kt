@@ -60,6 +60,9 @@ fun PlayerScreen(
     val duration by viewModel.duration.collectAsState()
     val loopMode by viewModel.loopMode.collectAsState()
     val isFastForward by viewModel.isFastForward.collectAsState()
+    // 倍速只有 ViewModel 一份状态：原来 UI 里还有一份 currentSpeed，
+    // 长按调速时两个一起改，谁也不知道以谁为准，HUD 显示与实际播放速度可能不一致。
+    val currentSpeed by viewModel.playbackSpeed.collectAsState()
     val currentIndex by viewModel.currentIndex.collectAsState()
     val playlist by viewModel.playlist.collectAsState()
     val allPlaylists by mainViewModel.playlists.collectAsState()
@@ -67,7 +70,6 @@ fun PlayerScreen(
 
     var showControls by remember { mutableStateOf(true) }
     var showSpeedIndicator by remember { mutableStateOf(false) }
-    var currentSpeed by remember { mutableFloatStateOf(3f) }
     var showVolIndicator by remember { mutableStateOf(false) }
     var volLevel by remember { mutableIntStateOf(0) }
     var showSeekPreview by remember { mutableStateOf(false) }
@@ -190,8 +192,12 @@ fun PlayerScreen(
                             // 横滑快进：执行 seek
                             viewModel.seekTo(seekTargetMs); showSeekPreview = false
                         } else if (result == null) {
-                            // 长按：倍速模式
-                            showSpeedIndicator = true; currentSpeed = 3f; viewModel.setSpeed(3f)
+                            // 长按：倍速模式。
+                            // 走 ViewModel 的 startFastForward/stopFastForward，不再直接 setSpeed：
+                            // 只有经过这一对方法，isFastForward 才会被正确置位，控制条的
+                            // "长按期间不自动隐藏" 逻辑才有判断依据。
+                            viewModel.startFastForward()
+                            showSpeedIndicator = true
                             try {
                                 while (true) {
                                     val ev = awaitPointerEvent(); val ch = ev.changes.firstOrNull() ?: break
@@ -199,11 +205,11 @@ fun PlayerScreen(
                                     val dy = startY - ch.position.y
                                     val dpDy = with(density) { dy.toDp().value }
                                     val raw = 3f + (dpDy / 20f) * 0.5f
-                                    currentSpeed = ((raw.coerceIn(2f, 5f) * 2f).roundToInt() / 2f).toFloat().coerceIn(2f, 5f)
-                                    viewModel.setSpeed(currentSpeed)
+                                    val speed = ((raw.coerceIn(2f, 5f) * 2f).roundToInt() / 2f).toFloat().coerceIn(2f, 5f)
+                                    viewModel.setSpeed(speed)
                                 }
                             } finally {
-                                showSpeedIndicator = false; viewModel.setSpeed(1f)
+                                showSpeedIndicator = false; viewModel.stopFastForward()
                             }
                         } else {
                             val now = System.currentTimeMillis()

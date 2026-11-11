@@ -64,6 +64,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _isFastForward = MutableStateFlow(false)
     val isFastForward: StateFlow<Boolean> = _isFastForward.asStateFlow()
 
+    // 是否保持倍速（松手不回 1x）。默认关，避免误触后忘了自己在 3 倍速里。
+    private val _keepSpeed = MutableStateFlow(false)
+    val keepSpeed: StateFlow<Boolean> = _keepSpeed.asStateFlow()
+
     // 循环模式
     private val _loopMode = MutableStateFlow(LoopMode.PLAYLIST)
     val loopMode: StateFlow<LoopMode> = _loopMode.asStateFlow()
@@ -221,14 +225,28 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     /** 长按开始3倍速（兼容旧操作） */
     fun startFastForward() {
-        setSpeed(3f)
+        // 长按手势原先直接调 setSpeed(3f)，从不走这里，导致 _isFastForward 恒为 false。
+        // 而播放页的"3 秒自动隐藏控制条"逻辑依赖它判断"是否正在长按"，
+        // 于是控制条会在长按调速的过程中自己消失。现在统一从这里进。
         _isFastForward.value = true
+        setSpeed(3f)
     }
 
-    /** 松开恢复原速 */
+    /** 松开恢复原速（除非开了「保持倍速」） */
     fun stopFastForward() {
-        setSpeed(1f)
         _isFastForward.value = false
+        if (!_keepSpeed.value) setSpeed(1f)
+    }
+
+    /** 「保持倍速」开关：开着时松手不回 1x，倍速一直生效到下次长按或手动复位 */
+    fun setKeepSpeed(on: Boolean) {
+        _keepSpeed.value = on
+    }
+
+    /** 手动把倍速复位到 1x */
+    fun resetSpeed() {
+        _keepSpeed.value = false
+        setSpeed(1f)
     }
 
     // ==================== 内部处理 ====================

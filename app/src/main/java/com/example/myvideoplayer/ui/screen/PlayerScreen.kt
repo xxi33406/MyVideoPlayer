@@ -56,8 +56,6 @@ fun PlayerScreen(
     onBack: () -> Unit
 ) {
     val isPlaying by viewModel.isPlaying.collectAsState()
-    val currentPosition by viewModel.currentPosition.collectAsState()
-    val duration by viewModel.duration.collectAsState()
     val loopMode by viewModel.loopMode.collectAsState()
     val isFastForward by viewModel.isFastForward.collectAsState()
     // 倍速只有 ViewModel 一份状态：原来 UI 里还有一份 currentSpeed，
@@ -67,6 +65,11 @@ fun PlayerScreen(
     val playlist by viewModel.playlist.collectAsState()
     val allPlaylists by mainViewModel.playlists.collectAsState()
     val playerError by viewModel.playerError.collectAsState()
+
+    // 刻意不在这一层收集 currentPosition / duration。
+    // 进度每 500ms 变一次，在这一层订阅等于让整个播放页（PlayerView、两套手势、
+    // 五个 AnimatedVisibility、侧栏 LazyColumn）跟着每 500ms 全量重组一次。
+    // 真正需要进度的只有底部控制条，它自己收集（见 PlayerBottomBar）。
 
     var showControls by remember { mutableStateOf(true) }
     var showSpeedIndicator by remember { mutableStateOf(false) }
@@ -89,10 +92,11 @@ fun PlayerScreen(
 
     var lastTapTime by remember { mutableLongStateOf(0L) }
 
-    // 手势 lambda 里需要读到"最新"的进度与时长，但这两个值不能再当 pointerInput 的 key
-    // （否则每次进度刷新都会重建手势检测器）。用 rememberUpdatedState 让 lambda 读到最新值。
-    val latestPosition by rememberUpdatedState(currentPosition)
-    val latestDuration by rememberUpdatedState(duration)
+    // 手势 lambda 里需要读到"最新"的进度与时长，但不能为了它们订阅 StateFlow
+    // （那会把整页拉进每 500ms 的重组）。StateFlow.value 是线程安全的即时快照，
+    // 在拖动开始的那一刻读一次就够用了。
+    fun latestPosition(): Long = viewModel.currentPosition.value
+    fun latestDuration(): Long = viewModel.duration.value
 
     val activity = context as Activity
     DisposableEffect(Unit) {
@@ -182,7 +186,7 @@ fun PlayerScreen(
                                     isSeek = true; seekDelta = dx
                                     // 显示快进预览
                                     val dpDx = with(density) { dx.toDp().value }
-                                    val seekMs = (latestPosition + (dpDx * 1000).toLong()).coerceIn(0, latestDuration)
+                                    val seekMs = (latestPosition() + (dpDx * 1000).toLong()).coerceIn(0, latestDuration())
                                     seekTargetMs = seekMs; showSeekPreview = true
                                 }
                             }
@@ -343,29 +347,13 @@ fun PlayerScreen(
             exit = slideOutVertically { it },
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
-            Column(Modifier.fillMaxWidth().background(Color.Black.copy(0.75f)).padding(horizontal = 16.dp, vertical = 8.dp)) {
-                val p = if (duration > 0) currentPosition.toFloat() / duration else 0f
-                Slider(p, { viewModel.seekTo((it * duration).toLong()) }, Modifier.fillMaxWidth(),
-                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(0.3f)))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatTime(currentPosition), color = Color.White, fontSize = 12.sp)
-                    Text(formatTime(duration), color = Color.White, fontSize = 12.sp)
-                }
-                Spacer(Modifier.height(6.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { viewModel.toggleLoopMode() }) {
-                        Icon(if (loopMode == LoopMode.PLAYLIST) Icons.Filled.Repeat else Icons.Filled.RepeatOne, null, tint = Color.White)
-                    }
-                    IconButton(onClick = { viewModel.previous() }) { Icon(Icons.Filled.SkipPrevious, "上一集", tint = Color.White) }
-                    IconButton(onClick = { viewModel.playPause() }, modifier = Modifier.size(52.dp).background(Color.White.copy(0.2f), CircleShape)) {
-                        Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(30.dp))
-                    }
-                    IconButton(onClick = { viewModel.next() }) { Icon(Icons.Filled.SkipNext, "下一集", tint = Color.White) }
-                    IconButton(onClick = { showSidebar = !showSidebar }) {
-                        Icon(Icons.Filled.Menu, "列表", tint = if (showSidebar) Color.White else Color.White.copy(0.6f))
-                    }
-                }
-            }
+            PlayerBottomBar(
+                viewModel = viewModel,
+                isPlaying = isPlaying,
+                loopMode = loopMode,
+                sidebarOpen = showSidebar,
+                onToggleSidebar = { showSidebar = !showSidebar }
+            )
         }
 
         // 右侧侧栏
@@ -463,6 +451,50 @@ fun PlayerScreen(
             },
             confirmButton = { TextButton(onClick = { showAddDialog = false }) { Text("关闭") } }
         )
+    }
+}
+
+/**
+ * 底部控制条：进度滑块 + 时间 + 五个播放控制按钮。
+ *
+ * 单独抽出来的唯一原因是**进度订阅的隔离**。currentPosition / duration 每 500ms
+ * 变一次，如果在 PlayerScreen 顶层 collect，整个播放页（PlayerView、两套手势检测器、
+ * 五个 AnimatedVisibility、侧栏 LazyColumn）会跟着全量重组。让这两个 StateFlow 只在
+ * 这个函数体内被收集，重组范围就被限制在 Slider 和两个 Text 上。
+ */
+@Composable
+private fun PlayerBottomBar(
+    viewModel: PlayerViewModel,
+    isPlaying: Boolean,
+    loopMode: LoopMode,
+    sidebarOpen: Boolean,
+    onToggleSidebar: () -> Unit
+) {
+    val currentPosition by viewModel.currentPosition.collectAsState()
+    val duration by viewModel.duration.collectAsState()
+
+    Column(Modifier.fillMaxWidth().background(Color.Black.copy(0.75f)).padding(horizontal = 16.dp, vertical = 8.dp)) {
+        val p = if (duration > 0) currentPosition.toFloat() / duration else 0f
+        Slider(p, { viewModel.seekTo((it * duration).toLong()) }, Modifier.fillMaxWidth(),
+            colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(0.3f)))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(formatTime(currentPosition), color = Color.White, fontSize = 12.sp)
+            Text(formatTime(duration), color = Color.White, fontSize = 12.sp)
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { viewModel.toggleLoopMode() }) {
+                Icon(if (loopMode == LoopMode.PLAYLIST) Icons.Filled.Repeat else Icons.Filled.RepeatOne, null, tint = Color.White)
+            }
+            IconButton(onClick = { viewModel.previous() }) { Icon(Icons.Filled.SkipPrevious, "上一集", tint = Color.White) }
+            IconButton(onClick = { viewModel.playPause() }, modifier = Modifier.size(52.dp).background(Color.White.copy(0.2f), CircleShape)) {
+                Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(30.dp))
+            }
+            IconButton(onClick = { viewModel.next() }) { Icon(Icons.Filled.SkipNext, "下一集", tint = Color.White) }
+            IconButton(onClick = onToggleSidebar) {
+                Icon(Icons.Filled.Menu, "列表", tint = if (sidebarOpen) Color.White else Color.White.copy(0.6f))
+            }
+        }
     }
 }
 

@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.media.AudioManager
 import android.util.Log
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
@@ -48,6 +49,7 @@ import com.example.myvideoplayer.ui.viewmodel.LoopMode
 import com.example.myvideoplayer.ui.viewmodel.MainViewModel
 import com.example.myvideoplayer.ui.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
@@ -88,6 +90,7 @@ fun PlayerScreen(
     var existingPlaylistIds by remember { mutableStateOf(emptySet<Long>()) }
     val density = LocalDensity.current
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val audioManager = context.getSystemService(AudioManager::class.java)
     val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
@@ -120,6 +123,28 @@ fun PlayerScreen(
 
     LaunchedEffect(showControls, isPlaying, isFastForward) {
         if (showControls && isPlaying && !isFastForward) { delay(3000); showControls = false }
+    }
+
+    // 播放中保持屏幕常亮，暂停 30 秒后释放。
+    // 直接用 window 的 FLAG_KEEP_SCREEN_ON 而不是 Modifier 上的 keepScreenOn：
+    // 这里需要"暂停后延迟 30 秒再释放"，Modifier 那套只有布尔开关，
+    // 用户暂停去看一眼消息回来，屏幕不该已经黑了。
+    DisposableEffect(isPlaying) {
+        if (isPlaying) {
+            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            onDispose { activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+        } else {
+            // 暂停后先继续保持常亮 30 秒，超时才允许息屏
+            val keepAliveJob = scope.launch {
+                delay(30_000)
+                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            onDispose {
+                keepAliveJob.cancel()
+                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
     }
     LaunchedEffect(videos) {
         if (videos.isNotEmpty()) viewModel.setPlaylist(videos, startIndex)

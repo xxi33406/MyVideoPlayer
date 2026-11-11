@@ -275,16 +275,43 @@ fun PlayerScreen(
             }
         }
 
-        // 倍速
+        // 倍速 HUD：画面右侧中部，竖排刻度 + 当前倍速。
+        // 原来放在左上角，32sp 裸数字（整数时 formatSpeed 返回 "3" 而不是 "3x"）
+        // 还常驻一行 11sp 的「上下滑调速」，等于把调试信息压在画面上，
+        // 看视频时视线每次都会被它拽走。现在改成靠右侧边缘的轻量刻度，
+        // 遮挡感更低，且松手即消失。
         androidx.compose.animation.AnimatedVisibility(
             visible = showSpeedIndicator,
-            enter = fadeIn() + scaleIn(),
-            exit = fadeOut() + scaleOut(),
-            modifier = Modifier.align(Alignment.TopStart).padding(top = 16.dp, start = 16.dp)
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.CenterEnd).padding(end = 24.dp)
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("${formatSpeed(currentSpeed)}", color = Color.White, fontSize = 32.sp)
-                Text("上下滑调速", color = Color.White.copy(0.7f), fontSize = 11.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 竖排刻度：5 档，当前档位高亮
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(5f, 4f, 3f, 2f, 1f).forEach { tick ->
+                        val active = kotlin.math.abs(currentSpeed - tick) < 0.25f
+                        Box(
+                            Modifier
+                                .width(if (active) 22.dp else 12.dp)
+                                .height(if (active) 3.dp else 2.dp)
+                                .background(
+                                    if (active) Color.White else Color.White.copy(0.35f),
+                                    RoundedCornerShape(2.dp)
+                                )
+                        )
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    formatSpeed(currentSpeed),
+                    color = Color.White,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
 
@@ -507,4 +534,9 @@ private fun PlayerBottomBar(
 }
 
 private fun formatTime(ms: Long): String = "%02d:%02d".format((ms / 1000).toInt() / 60, (ms / 1000).toInt() % 60)
-private fun formatSpeed(s: Float) = if (s == s.toLong().toFloat()) s.toLong().toString() else String.format("%.1f", s)
+/**
+ * 倍速文本。统一保留一位小数并带 x 后缀：
+ * 原来整数倍速返回 "3"（不带单位），屏幕上孤零零一个数字，
+ * 不看上下文根本不知道那是倍速。
+ */
+private fun formatSpeed(s: Float): String = String.format(java.util.Locale.US, "%.1fx", s)

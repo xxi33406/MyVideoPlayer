@@ -38,6 +38,16 @@ object ThumbnailCache {
     private const val TARGET_H = 180
 
     /**
+     * 省电模式下的目标尺寸。
+     *
+     * 缩略图解码是整个列表页最重的活（每个视频都要起一次 MediaMetadataRetriever），
+     * 低电量时把尺寸砍半：解码出来的像素量只有 1/4，磁盘 WebP 体积也小得多。
+     * 卡片显示尺寸不变，只是放大后会糊一点 —— 电量告急时这个取舍是划算的。
+     */
+    private const val LOW_POWER_W = 160
+    private const val LOW_POWER_H = 90
+
+    /**
      * 内存上限按字节算，不按张数。320x180 的 ARGB_8888 单张约 230KB，
      * 16MB 大约能放 70 张；原来写死 40 张，实际占多少内存完全取决于视频分辨率。
      */
@@ -59,23 +69,47 @@ object ThumbnailCache {
     private val writeCount = AtomicInteger(0)
 
     /** 同步读内存缓存。列表项首帧渲染时用，拿不到就先显示占位图标。 */
-    fun get(path: String): Bitmap? = memory.get(path)
+    fun get(path: String): Bitmap? = memory.get(cacheKey(path))
+
+    /**
+     * 是否用低分辨率解码。
+     *
+     * 由 [powerSaveMode] 控制，在 Application 里监听 ACTION_POWER_SAVE_MODE_CHANGED 更新。
+     * 缓存键要跟着变 —— 否则省电模式解出来的 160x90 会被当成正常结果，
+     * 退出省电后列表一直是糊的。
+     */
+    @Volatile
+    private var lowPower = false
+
+    fun setLowPowerMode(on: Boolean) {
+        if (lowPower == on) return
+        lowPower = on
+        // 尺寸变了，旧的缓存全部作废，否则会拿高清图去充当低清（无害）
+        // 或拿低清图充当高清（有损）。直接清掉最简单。
+        memory.evictAll()
+    }
+
+    private fun cacheKey(path: String): String = if (lowPower) "$path#low" else path
+
+    private fun targetW(): Int = if (lowPower) LOW_POWER_W else TARGET_W
+    private fun targetH(): Int = if (lowPower) LOW_POWER_H else TARGET_H
 
     suspend fun load(context: Context, path: String): Bitmap? {
-        memory.get(path)?.let { return it }
+        val key = cacheKey(path)
+        memory.get(key)?.let { return it }
         return withContext(Dispatchers.IO) {
             sem.withPermit {
                 // 排队期间可能已经被别的协程填好了，再查一次避免重复解码
-                memory.get(path)?.let { return@withPermit it }
+                memory.get(key)?.let { return@withPermit it }
 
-                val file = diskFile(context, path)
+                val file = diskFile(context, key)
                 decodeDisk(file)?.let {
-                    memory.put(path, it)
+                    memory.put(key, it)
                     return@withPermit it
                 }
 
                 decodeFrame(context, path)?.let {
-                    memory.put(path, it)
+                    memory.put(key, it)
                     writeDisk(file, it)
                     it
                 }
@@ -109,8 +143,8 @@ object ThumbnailCache {
             retriever.getScaledFrameAtTime(
                 timeUs,
                 MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                TARGET_W,
-                TARGET_H
+                targetW(),
+                targetH()
             )
         } catch (e: Exception) {
             Log.w(TAG, "取帧失败: $path", e)

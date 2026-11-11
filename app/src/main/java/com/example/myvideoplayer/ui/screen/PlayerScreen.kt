@@ -111,6 +111,8 @@ fun PlayerScreen(
             // 表现就是"退出播放页后仍停在横屏"。
             runCatching { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
                 .onFailure { Log.w("PlayerScreen", "方向复位失败", it) }
+            // 退出前把进度落盘：进度循环有 5 秒节流，不补这一次会丢掉最后几秒
+            viewModel.savePositionNow()
             viewModel.stop()
         }
     }
@@ -127,11 +129,17 @@ fun PlayerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(isPlaying, lifecycleOwner) {
         if (isPlaying) {
-            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                while (true) {
-                    viewModel.updatePosition()
-                    delay(500)
+            try {
+                lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                    while (true) {
+                        viewModel.updatePosition()
+                        delay(500)
+                    }
                 }
+            } finally {
+                // 切后台或暂停都会退出上面的循环，补一次落盘，
+                // 否则续播点会落后最多 5 秒（节流窗口）。
+                viewModel.savePositionNow()
             }
         }
     }

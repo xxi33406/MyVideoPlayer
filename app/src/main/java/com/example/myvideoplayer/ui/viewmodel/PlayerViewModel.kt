@@ -28,9 +28,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private companion object {
         const val TAG = "PlayerViewModel"
+
+        /** 短于这个时长的进度不值得恢复，从头播即可 */
+        const val MIN_RESUME_MS = 5_000L
+
+        /** 超过片长这个比例视为已看完，下次进入从头开始 */
+        const val RESUME_END_RATIO = 0.95
+
+        /** 进度落库的最小间隔，避免播放时每 500ms 写一次数据库 */
+        const val SAVE_INTERVAL_MS = 5_000L
     }
 
     private val repository = AppContainer.of(application).videoRepository
+
+    /** 上次把进度写进数据库的时间戳，用于 [SAVE_INTERVAL_MS] 限频 */
+    private var lastSavedAt = 0L
 
     /** ExoPlayer 实例 */
     var exoPlayer: ExoPlayer? = null
@@ -155,6 +167,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             Log.i(TAG, "开始播放: ${video.name} (${video.path})")
             val mediaItem = MediaItem.fromUri(Uri.parse(video.path))
             player.setMediaItem(mediaItem)
+
+            // 断点续播。数据库里一直存着 position，但这条链路此前从未接上：
+            // repository.updatePlaybackPosition() 全项目零调用，playCurrent() 也不读 position，
+            // 所以"上次看到哪"根本不存在。
+            // 两条边界：太长（超过 95%）视为已看完，从头开始；太短（不到 5 秒）不值得续。
+            val resumeMs = video.position
+            val knownDuration = video.duration
+            val canResume = resumeMs > MIN_RESUME_MS &&
+                (knownDuration <= 0 || resumeMs < knownDuration * RESUME_END_RATIO)
+            if (canResume) {
+                player.seekTo(resumeMs)
+                Log.i(TAG, "断点续播: ${video.name} @ ${resumeMs}ms")
+            }
+
             player.prepare()
             player.play()
         } catch (e: Exception) {
@@ -270,6 +296,39 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val player = exoPlayer ?: return
         _currentPosition.value = player.currentPosition
         _duration.value = player.duration.coerceAtLeast(0)
+        maybeSavePosition()
+    }
+
+    /**
+     * 把当前进度写回数据库，但限频。
+     * 这个方法被 500ms 的进度循环调用，直接写库会变成每秒两次磁盘写；
+     * 每 [SAVE_INTERVAL_MS] 落一次盘，对"下次从哪继续"完全够用。
+     */
+    private fun maybeSavePosition() {
+        val player = exoPlayer ?: return
+        val video = _playlist.value.getOrNull(_currentIndex.value) ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastSavedAt < SAVE_INTERVAL_MS) return
+        val pos = player.currentPosition
+        // 播到片尾时不要留下"接近结尾"的进度，否则下次进来会续在最后几秒
+        val total = player.duration
+        val toSave = if (total > 0 && pos >= total * RESUME_END_RATIO) 0L else pos
+        lastSavedAt = now
+        viewModelScope.launch { repository.updatePlaybackPosition(video.id, toSave) }
+    }
+
+    /**
+     * 立即落盘一次进度。退出播放页、进入后台时调用——
+     * 这种情况下等不到下一次 5 秒节流窗口，不写就等于丢掉最后几秒的观看进度。
+     */
+    fun savePositionNow() {
+        val player = exoPlayer ?: return
+        val video = _playlist.value.getOrNull(_currentIndex.value) ?: return
+        val pos = player.currentPosition
+        val total = player.duration
+        val toSave = if (total > 0 && pos >= total * RESUME_END_RATIO) 0L else pos
+        lastSavedAt = System.currentTimeMillis()
+        viewModelScope.launch { repository.updatePlaybackPosition(video.id, toSave) }
     }
 
     override fun onCleared() {

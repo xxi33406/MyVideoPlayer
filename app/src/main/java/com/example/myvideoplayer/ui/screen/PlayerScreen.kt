@@ -3,6 +3,7 @@ package com.example.myvideoplayer.ui.screen
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.media.AudioManager
+import android.util.Log
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.animation.*
@@ -20,6 +21,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -60,6 +63,7 @@ fun PlayerScreen(
     val currentIndex by viewModel.currentIndex.collectAsState()
     val playlist by viewModel.playlist.collectAsState()
     val allPlaylists by mainViewModel.playlists.collectAsState()
+    val playerError by viewModel.playerError.collectAsState()
 
     var showControls by remember { mutableStateOf(true) }
     var showSpeedIndicator by remember { mutableStateOf(false) }
@@ -83,12 +87,22 @@ fun PlayerScreen(
 
     var lastTapTime by remember { mutableLongStateOf(0L) }
 
+    // 手势 lambda 里需要读到"最新"的进度与时长，但这两个值不能再当 pointerInput 的 key
+    // （否则每次进度刷新都会重建手势检测器）。用 rememberUpdatedState 让 lambda 读到最新值。
+    val latestPosition by rememberUpdatedState(currentPosition)
+    val latestDuration by rememberUpdatedState(duration)
+
     val activity = context as Activity
     DisposableEffect(Unit) {
         activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         onDispose {
+            // 方向复位必须放在最前，且与 stop() 互相独立：
+            // 原来写成 onDispose { viewModel.stop(); requestedOrientation = PORTRAIT }，
+            // 一旦 stop() 抛异常（播放器已 release），方向复位这句就永远执行不到，
+            // 表现就是"退出播放页后仍停在横屏"。
+            runCatching { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+                .onFailure { Log.w("PlayerScreen", "方向复位失败", it) }
             viewModel.stop()
-            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
     }
 
@@ -128,17 +142,25 @@ fun PlayerScreen(
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         // 视频播放器
+        // 关键：必须有 update 块。factory 只在首次组合时执行一次，写进去的
+        // `player = viewModel.exoPlayer` 会把 PlayerView 永久绑死在"那一刻"的 ExoPlayer 实例上。
+        // P3 把 PlayerViewModel 收束到播放路由后，ExoPlayer 会随路由销毁重建，
+        // 而 PlayerView 仍指向已 release 的旧实例：画面停在最后一帧不动，
+        // 且旧 PlayerView 处于失效状态会吞掉触摸事件，表现为"所有按键手势都失效"。
         AndroidView(
             factory = { ctx ->
                 androidx.media3.ui.PlayerView(ctx).apply {
-                    player = viewModel.exoPlayer
                     useController = false
                     layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                 }
             },
+            update = { playerView -> playerView.player = viewModel.exoPlayer },
             modifier = Modifier.fillMaxSize()
                 // 主区域：横滑快进 + 倍速 + 单击/双击（排除右 20% 音量区）
-                .pointerInput(density, duration) {
+                // key 只留 density：原来把 duration 也当 key，视频时长从 0 变成真实值时
+                // 会重建整个手势检测器，正在进行的拖动会被打断（松手前手势凭空消失）。
+                // duration 的实时值改由 rememberUpdatedState 读取。
+                .pointerInput(density) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val startX = down.position.x; val startY = down.position.y
@@ -158,7 +180,7 @@ fun PlayerScreen(
                                     isSeek = true; seekDelta = dx
                                     // 显示快进预览
                                     val dpDx = with(density) { dx.toDp().value }
-                                    val seekMs = (currentPosition + (dpDx * 1000).toLong()).coerceIn(0, duration)
+                                    val seekMs = (latestPosition + (dpDx * 1000).toLong()).coerceIn(0, latestDuration)
                                     seekTargetMs = seekMs; showSeekPreview = true
                                 }
                             }
@@ -268,7 +290,7 @@ fun PlayerScreen(
 
         // 右上加入列表
         IconButton(onClick = { showAddDialog = true }, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).background(Color.Black.copy(0.5f), CircleShape)) {
-            Icon(Icons.Filled.PlaylistAdd, "加入列表", tint = Color.White)
+            Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "加入列表", tint = Color.White)
         }
 
         // 音量提示——调节时显示
@@ -285,7 +307,7 @@ fun PlayerScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.VolumeUp, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    Icon(Icons.AutoMirrored.Filled.VolumeUp, null, tint = Color.White, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
                     // 音量条
                     val frac = if (maxVolume > 0) volLevel.toFloat() / maxVolume else 0f
@@ -367,6 +389,43 @@ fun PlayerScreen(
         }
         // 添加提示
         SnackbarHost(snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp))
+
+        // 播放错误提示
+        // playerError 此前只在 ViewModel 里写、全项目无人读，播放失败时用户看到的
+        // 就是一整块纯黑画面 + 点了没反应的按钮，看起来和"手势全失效"一模一样。
+        AnimatedVisibility(
+            visible = playerError != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            Box(
+                Modifier
+                    .padding(32.dp)
+                    .background(Color.Black.copy(0.85f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 20.dp, vertical = 16.dp)
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Warning, null, tint = Color(0xFFFFB74D), modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("播放失败", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        playerError.orEmpty(),
+                        color = Color.White.copy(0.75f),
+                        fontSize = 12.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = { viewModel.clearError() }) {
+                        Text("知道了", color = Color.White)
+                    }
+                }
+            }
+        }
     }
 
     // 加入播放列表对话框

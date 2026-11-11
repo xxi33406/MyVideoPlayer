@@ -2,6 +2,7 @@ package com.example.myvideoplayer.ui.viewmodel
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -22,6 +23,10 @@ import kotlinx.coroutines.launch
  * 管理播放状态、速度控制、循环模式
  */
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
+
+    private companion object {
+        const val TAG = "PlayerViewModel"
+    }
 
     private val repository = AppContainer.of(application).videoRepository
 
@@ -87,6 +92,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         if (state == Player.STATE_ENDED) handlePlaybackEnded()
                     }
                     override fun onPlayerError(error: PlaybackException) {
+                        // 打日志：此前只写 StateFlow，排查时 logcat 里什么都看不到
+                        Log.e(TAG, "播放失败: ${error.errorCodeName} - ${error.message}", error)
                         _playerError.value = error.localizedMessage ?: "播放出错"
                     }
                 })
@@ -123,13 +130,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         val index = _currentIndex.value.coerceIn(0, videos.lastIndex)
         val video = videos[index]
+        // 切换视频时先清掉上一个视频残留的错误提示
+        _playerError.value = null
         viewModelScope.launch { repository.updateLastPlayedAt(video.id) }
         try {
+            Log.i(TAG, "开始播放: ${video.name} (${video.path})")
             val mediaItem = MediaItem.fromUri(Uri.parse(video.path))
             player.setMediaItem(mediaItem)
             player.prepare()
             player.play()
         } catch (e: Exception) {
+            Log.e(TAG, "无法播放: ${video.name} (${video.path})", e)
             _playerError.value = "无法播放：${video.name}"
         }
     }
@@ -141,8 +152,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     /** 停止播放，用于退出播放器时调用 */
     fun stop() {
-        exoPlayer?.stop()
-        exoPlayer?.clearMediaItems()
+        // 退出播放页时会经 onDispose 调用；若此时 player 已 release（如 Activity 重建、
+        // ViewModel 已 onCleared），ExoPlayer 内部会抛 IllegalStateException。
+        // 原来没有任何保护，异常会中断 onDispose 后续语句，导致方向复位被跳过。
+        try {
+            exoPlayer?.stop()
+            exoPlayer?.clearMediaItems()
+        } catch (e: Exception) {
+            Log.w(TAG, "stop() 时播放器已不可用，忽略", e)
+        }
     }
 
     fun seekTo(positionMs: Long) {
@@ -175,6 +193,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** 清除错误状态（用户点"知道了"时调用） */
+    fun clearError() {
+        _playerError.value = null
+    }
+
     /** 设置任意播放速度 */
     fun setSpeed(speed: Float) {
         val clampedSpeed = speed.coerceIn(0.5f, 5f)
@@ -197,14 +220,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     // ==================== 内部处理 ====================
 
     private fun handlePlaybackEnded() {
-        when (_loopMode.value) {
-            LoopMode.SINGLE -> {
+        // 播放列表只有一个视频时，PLAYLIST 模式走 next() 会 (0+1)%1 得到 0，
+        // 也就是立刻重播同一个视频，配合 playWhenReady 形成无限循环：视频反复从头播，
+        // 用户看到的是"播完又跳回开头、进度条永远在 00:0x"，很像播放卡死。
+        // 单视频时按单曲循环处理更合理。
+        val size = _playlist.value.size
+        when {
+            _loopMode.value == LoopMode.SINGLE || size <= 1 -> {
                 exoPlayer?.seekTo(0)
                 exoPlayer?.play()
             }
-            LoopMode.PLAYLIST -> {
-                next()
-            }
+            else -> next()
         }
     }
 

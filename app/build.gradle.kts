@@ -80,6 +80,8 @@ dependencies {
 
     // ViewModel Compose
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    // repeatOnLifecycle + LocalLifecycleOwner（后者从 ui 包迁移到这里）
+    implementation(libs.androidx.lifecycle.runtime.compose)
 
     // Material Icons Extended
     implementation(libs.androidx.compose.material.icons.extended)

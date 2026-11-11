@@ -38,6 +38,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.example.myvideoplayer.data.entity.PlaylistEntity
 import com.example.myvideoplayer.data.entity.VideoEntity
 import com.example.myvideoplayer.ui.viewmodel.LoopMode
@@ -118,12 +121,17 @@ fun PlayerScreen(
     LaunchedEffect(videos) {
         if (videos.isNotEmpty()) viewModel.setPlaylist(videos, startIndex)
     }
-    // 仅播放时更新进度
-    LaunchedEffect(isPlaying) {
+    // 仅播放时更新进度，且只在页面可见（RESUMED）时跑。
+    // 原来只判断 isPlaying：切到后台后 Composable 仍在组合中，这个 while 循环
+    // 会继续每 500ms 唤醒一次 CPU，是"后台耗电"的直接来源。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(isPlaying, lifecycleOwner) {
         if (isPlaying) {
-            while (true) {
-                viewModel.updatePosition()
-                delay(500)
+            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (true) {
+                    viewModel.updatePosition()
+                    delay(500)
+                }
             }
         }
     }

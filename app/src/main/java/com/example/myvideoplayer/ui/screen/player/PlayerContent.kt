@@ -71,6 +71,31 @@ internal fun PlayerContent(
     fun latestPosition(): Long = viewModel.currentPosition.value
     fun latestDuration(): Long = viewModel.duration.value
 
+    // 横滑灵敏度按时长自适应。
+    //
+    // 原来固定 1dp≈1s。这在本机的横屏（满屏约 914dp）上意味着「滑满一屏走 914 秒」：
+    // 十分钟的片子滑一屏早就过头，短片手感没问题；但 30 分钟只走 51%，1 小时只走 25%，
+    // 2 小时只走 13%——想去片尾得来回滑十几次，手势等于废掉。
+    //
+    // 路线图原本写「<10min 用 1dp/s，10min~1h 满屏跳 1/4，>1h 满屏跳 1/2」。
+    // 实测算下来这个分档有硬伤：满屏跳 1/4 在分界点正好算出 984 ms/dp，
+    // 被 1000 的下限钳住，所以 10 分钟到 1 小时这一段实际完全没有自适应；
+    // 而跨过 1 小时时又从 984 突增到 1968，手感一次翻倍。
+    //
+    // 改成连续映射：满屏跳「全片时长的 1/4」是固定比例，
+    //   msPerDp = duration / 4 / fullWidthDp
+    // 但用下限 1000 兜住短片——低于 61 分钟的视频算出来不足 1000，全部落回基线，
+    // 等价于「短片保持原来的固定手感」。所以单条公式就能覆盖全部时长，
+    // 没有跳档，也不需要 SHORT/LONG 两个常量。
+    fun seekMsPerDp(fullWidthPx: Float): Long {
+        val durationMs = latestDuration()
+        if (durationMs <= 0L) return DEFAULT_SEEK_MS_PER_DP
+        val fullWidthDp = with(density) { fullWidthPx.toDp().value }.toFloat()
+        if (fullWidthDp <= 0f) return DEFAULT_SEEK_MS_PER_DP
+        return (durationMs / 4.0 / fullWidthDp).toLong()
+            .coerceAtLeast(DEFAULT_SEEK_MS_PER_DP)
+    }
+
     var lastTapTime by remember { mutableLongStateOf(0L) }
 
     AndroidView(
@@ -110,9 +135,10 @@ internal fun PlayerContent(
                             val dx = ch.position.x - startX
                             if (abs(dx) > 30f) {
                                 isSeek = true
-                                // 1dp ≈ 1 秒：横滑距离直接换算成跳转量
+                                // 横滑距离换算成跳转量，比例按视频时长自适应
                                 val dpDx = with(density) { dx.toDp().value }
-                                seekTargetMs = (latestPosition() + (dpDx * 1000).toLong())
+                                val msPerDp = seekMsPerDp(w)
+                                seekTargetMs = (latestPosition() + (dpDx * msPerDp).toLong())
                                     .coerceIn(0, latestDuration().coerceAtLeast(0))
                                 onSeekPreview(seekTargetMs, true)
                             }
@@ -188,3 +214,11 @@ internal fun PlayerContent(
             }
     )
 }
+
+/**
+ * 横滑 1dp 对应的跳转毫秒数，短片保底下限。
+ *
+ * 1dp 换 1 秒是手感基线：十分钟以内的片子滑满一屏正好到头，符合直觉。
+ * 同时也是自适应公式的下限——低于 61 分钟的视频算出来的值都小于它，落回基线。
+ */
+private const val DEFAULT_SEEK_MS_PER_DP = 1_000L

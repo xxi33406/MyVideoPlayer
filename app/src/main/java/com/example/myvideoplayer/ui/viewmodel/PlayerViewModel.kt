@@ -1,29 +1,45 @@
 package com.example.myvideoplayer.ui.viewmodel
 
 import android.app.Application
+import android.content.ComponentName
 import android.net.Uri
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import com.example.myvideoplayer.AppContainer
 import com.example.myvideoplayer.data.entity.VideoEntity
-import kotlinx.coroutines.flow.*
+import com.example.myvideoplayer.playback.PlaybackService
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
  * 播放器 ViewModel
- * 管理播放状态、速度控制、循环模式
+ *
+ * P2-1 之前这里直接 new ExoPlayer，播放器生命周期跟着播放路由走：退出播放页就
+ * release，切后台再回来只要 Activity 被回收播放就断。现在播放器搬到
+ * [PlaybackService]，这里改成 MediaController —— 只发命令、不持有播放器。
+ *
+ * 两个直接收益：
+ * 1. 切后台能继续播（Service 是前台服务，进程不会被随手杀掉），通知栏和锁屏可控；
+ * 2. 原来为了省电只好在切后台时主动暂停（Composable 还在组合里、解码器满负荷，
+ *    实测切后台 30 秒烧 9.17 秒 CPU），现在这件事交给 Service 的前台身份解决。
+ *
+ * 代价是连接是异步的：MediaController 建出来那一刻 player 还没连上，
+ * 因此所有"进入页面就要播"的操作都走 [runWhenConnected] 排队。
  */
+@OptIn(UnstableApi::class)
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
@@ -34,22 +50,27 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         /** 超过片长这个比例视为已看完，下次进入从头开始 */
         const val RESUME_END_RATIO = 0.95
-
-        /** 进度落库的最小间隔，避免播放时每 500ms 写一次数据库 */
-        const val SAVE_INTERVAL_MS = 5_000L
     }
 
     private val repository = AppContainer.of(application).videoRepository
 
-    /** 上次把进度写进数据库的时间戳，用于 [SAVE_INTERVAL_MS] 限频 */
-    private var lastSavedAt = 0L
+    /** MediaController，连上之前为 null */
+    private var controller: MediaController? = null
 
-    /** 暂停是否由"切到后台"触发；只有这种暂停才在回前台时自动恢复 */
-    private var pausedByBackground = false
+    /** 连接中就需要执行的操作，连上后按序执行 */
+    private val pendingActions = ArrayDeque<(MediaController) -> Unit>()
 
-    /** ExoPlayer 实例 */
-    var exoPlayer: ExoPlayer? = null
-        private set
+    /** 播放器接口，供 PlayerView 绑定。连上之前为 null，PlayerView 会显示黑屏 */
+    private val _player = MutableStateFlow<Player?>(null)
+
+    /**
+     * 给 UI 用的播放器引用。
+     *
+     * 必须是 StateFlow 而不是普通 getter：PlayerView 通过 `update` 块绑定它，
+     * 而 update 只在重组时执行。用普通 getter 的话，"组合时 controller 还没连上"
+     * 这种情况永远不会补绑，画面就一直是黑的。
+     */
+    val player: StateFlow<Player?> = _player.asStateFlow()
 
     // 当前播放列表
     private val _playlist = MutableStateFlow<List<VideoEntity>>(emptyList())
@@ -92,46 +113,68 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val playerError: StateFlow<String?> = _playerError.asStateFlow()
 
     init {
-        initPlayer()
+        connect()
     }
 
-    @OptIn(UnstableApi::class)
-    private fun initPlayer() {
+    /**
+     * 连到 [PlaybackService]。
+     *
+     * 连接成功前 [controller] 为 null，所有播放操作进 [pendingActions] 排队。
+     * 用主线程 executor 回调：MediaController 是给 UI 用的，回调本来就在主线程。
+     */
+    private fun connect() {
         val app = getApplication<Application>()
-        val dataSourceFactory = DefaultDataSource.Factory(app)
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        val token = SessionToken(app, ComponentName(app, PlaybackService::class.java))
+        val future = MediaController.Builder(app, token).buildAsync()
 
-        // 解码器兜底：默认关闭。遇到不支持的编码时 ExoPlayer 会直接抛
-        // DecoderInitializationException，而不是尝试别的解码器（含软解）。
-        // 打开的代价是极端情况下多一次初始化，换来的是少一次"这个视频打不开"。
-        val renderersFactory = DefaultRenderersFactory(app)
-            .setEnableDecoderFallback(true)
+        future.addListener(
+            {
+                try {
+                    val c = future.get()
+                    controller = c
+                    // 先发布给 UI（PlayerView 靠这个补绑），再补做排队的操作：
+                    // 排队的操作里可能有 play()，先有画面再出声音比反过来直观。
+                    _player.value = c
+                    attachListener(c)
+                    // 按序补做排队中的操作
+                    while (pendingActions.isNotEmpty()) {
+                        pendingActions.removeFirst().invoke(c)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "连接播放服务失败", e)
+                    _playerError.value = "连接播放服务失败：${e.message}"
+                }
+            },
+            ContextCompat.getMainExecutor(app)
+        )
+    }
 
-        exoPlayer = ExoPlayer.Builder(app, renderersFactory)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .build()
-            .apply {
-                // 播放期间需要持有 CPU 唤醒锁。不设的话系统在息屏/低电时可以挂起进程，
-                // 表现为音频断续、画面卡住然后被反复唤醒重试——比正常播放更费电。
-                setWakeMode(C.WAKE_MODE_NETWORK)
-                // 拔耳机/断蓝牙时自动暂停。原来会继续用扬声器外放，既扰人又费电。
-                setHandleAudioBecomingNoisy(true)
-
-                addListener(object : Player.Listener {
-                    override fun onIsPlayingChanged(isPlaying: Boolean) {
-                        _isPlaying.value = isPlaying
-                    }
-                    override fun onPlaybackStateChanged(state: Int) {
-                        if (state == Player.STATE_ENDED) handlePlaybackEnded()
-                    }
-                    override fun onPlayerError(error: PlaybackException) {
-                        // 打日志：此前只写 StateFlow，排查时 logcat 里什么都看不到
-                        Log.e(TAG, "播放失败: ${error.errorCodeName} - ${error.message}", error)
-                        _playerError.value = error.localizedMessage ?: "播放出错"
-                    }
-                })
-                playWhenReady = true
+    private fun attachListener(c: MediaController) {
+        c.addListener(object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                _isPlaying.value = isPlaying
             }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) handlePlaybackEnded()
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                // 打日志：此前只写 StateFlow，排查时 logcat 里什么都看不到
+                Log.e(TAG, "播放失败: ${error.errorCodeName} - ${error.message}", error)
+                _playerError.value = error.localizedMessage ?: "播放出错"
+            }
+
+            override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
+                _playbackSpeed.value = playbackParameters.speed
+            }
+        })
+    }
+
+    /** 连上就立刻执行，没连上就排队 */
+    private fun runWhenConnected(action: (MediaController) -> Unit) {
+        val c = controller
+        if (c != null) action(c) else pendingActions.addLast(action)
     }
 
     // ==================== 播放列表管理 ====================
@@ -157,7 +200,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     // ==================== 播放控制 ====================
 
     fun playCurrent() {
-        val player = exoPlayer ?: return
         val videos = _playlist.value
         if (videos.isEmpty()) return
 
@@ -166,83 +208,70 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         // 切换视频时先清掉上一个视频残留的错误提示
         _playerError.value = null
         viewModelScope.launch { repository.updateLastPlayedAt(video.id) }
-        try {
-            Log.i(TAG, "开始播放: ${video.name} (${video.path})")
-            val mediaItem = MediaItem.fromUri(Uri.parse(video.path))
-            player.setMediaItem(mediaItem)
 
-            // 断点续播。数据库里一直存着 position，但这条链路此前从未接上：
-            // repository.updatePlaybackPosition() 全项目零调用，playCurrent() 也不读 position，
-            // 所以"上次看到哪"根本不存在。
-            // 两条边界：太长（超过 95%）视为已看完，从头开始；太短（不到 5 秒）不值得续。
-            val resumeMs = video.position
-            val knownDuration = video.duration
-            val canResume = resumeMs > MIN_RESUME_MS &&
-                (knownDuration <= 0 || resumeMs < knownDuration * RESUME_END_RATIO)
-            if (canResume) {
-                player.seekTo(resumeMs)
-                Log.i(TAG, "断点续播: ${video.name} @ ${resumeMs}ms")
+        runWhenConnected { c ->
+            try {
+                Log.i(TAG, "开始播放: ${video.name} (${video.path})")
+                // mediaId 存主键：进度落库在 Service 侧做，那边要靠它认视频。
+                // mediaTitle 给通知栏和锁屏用。
+                val mediaItem = MediaItem.Builder()
+                    .setUri(Uri.parse(video.path))
+                    .setMediaId(video.id.toString())
+                    .setMediaMetadata(
+                        MediaMetadata.Builder()
+                            .setTitle(video.name)
+                            .build()
+                    )
+                    .build()
+                c.setMediaItem(mediaItem)
+
+                // 断点续播。数据库里一直存着 position，但这条链路此前从未接上：
+                // repository.updatePlaybackPosition() 全项目零调用，playCurrent() 也不读 position，
+                // 所以"上次看到哪"根本不存在。
+                // 两条边界：太长（超过 95%）视为已看完，从头开始；太短（不到 5 秒）不值得续。
+                val resumeMs = video.position
+                val knownDuration = video.duration
+                val canResume = resumeMs > MIN_RESUME_MS &&
+                    (knownDuration <= 0 || resumeMs < knownDuration * RESUME_END_RATIO)
+                if (canResume) {
+                    c.seekTo(resumeMs)
+                    Log.i(TAG, "断点续播: ${video.name} @ ${resumeMs}ms")
+                }
+
+                c.prepare()
+                c.play()
+            } catch (e: Exception) {
+                Log.e(TAG, "无法播放: ${video.name} (${video.path})", e)
+                _playerError.value = "无法播放：${video.name}"
             }
-
-            player.prepare()
-            player.play()
-        } catch (e: Exception) {
-            Log.e(TAG, "无法播放: ${video.name} (${video.path})", e)
-            _playerError.value = "无法播放：${video.name}"
         }
     }
 
     fun playPause() {
-        val player = exoPlayer ?: return
-        if (player.isPlaying) player.pause() else player.play()
-    }
-
-    /**
-     * 切到后台时暂停。
-     *
-     * 为什么不能只靠 UI 层停轮询：切后台后 Composable 仍在组合中，ExoPlayer
-     * 依然全速解码。实测（模拟器 Medium_Phone，切后台 30 秒）：CPU 时间增加
-     * 9.17 秒（约 30%），top -H 显示 MediaCodec_loop 11.1% +
-     * ExoPlayer:PlaybackThread 7.4% —— 画面看不见，解码器却满负荷。
-     *
-     * 用 pause() 而非 stop()：保留 MediaItem 与播放进度，切回来自动续上。
-     * 同时记一个标记，只有"我们主动暂停的"才在回前台时自动恢复，
-     * 用户在后台之前自己按了暂停的，回来后保持暂停。
-     */
-    fun pauseForBackground() {
-        val player = exoPlayer ?: return
-        if (!player.isPlaying) return
-        pausedByBackground = true
-        player.pause()
-        Log.i(TAG, "切到后台，暂停解码")
-    }
-
-    /** 切回前台时恢复播放，仅当暂停是本类在后台触发的 */
-    fun resumeFromBackground() {
-        if (!pausedByBackground) return
-        pausedByBackground = false
-        val player = exoPlayer ?: return
-        if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
-            player.play()
-            Log.i(TAG, "回到前台，恢复播放")
+        runWhenConnected { c ->
+            if (c.isPlaying) c.pause() else c.play()
         }
     }
 
-    /** 停止播放，用于退出播放器时调用 */
+    /**
+     * 停止播放，用于退出播放器时调用。
+     *
+     * 现在只停播放器、不释放实例——实例归 Service，退出播放页只是"不再看画面"。
+     * 若此时 UI 层还持有 controller，[onCleared] 时释放的是 controller，不是播放器。
+     */
     fun stop() {
-        // 退出播放页时会经 onDispose 调用；若此时 player 已 release（如 Activity 重建、
-        // ViewModel 已 onCleared），ExoPlayer 内部会抛 IllegalStateException。
-        // 原来没有任何保护，异常会中断 onDispose 后续语句，导致方向复位被跳过。
         try {
-            exoPlayer?.stop()
-            exoPlayer?.clearMediaItems()
+            runWhenConnected { c ->
+                c.stop()
+                c.clearMediaItems()
+            }
         } catch (e: Exception) {
             Log.w(TAG, "stop() 时播放器已不可用，忽略", e)
         }
     }
 
     fun seekTo(positionMs: Long) {
-        exoPlayer?.seekTo(positionMs)
+        runWhenConnected { it.seekTo(positionMs) }
     }
 
     fun next() {
@@ -280,7 +309,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun setSpeed(speed: Float) {
         val clampedSpeed = speed.coerceIn(0.5f, 5f)
         _playbackSpeed.value = clampedSpeed
-        exoPlayer?.setPlaybackSpeed(clampedSpeed)
+        runWhenConnected { it.setPlaybackSpeed(clampedSpeed) }
     }
 
     /** 长按开始3倍速（兼容旧操作） */
@@ -319,56 +348,83 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val size = _playlist.value.size
         when {
             _loopMode.value == LoopMode.SINGLE || size <= 1 -> {
-                exoPlayer?.seekTo(0)
-                exoPlayer?.play()
+                runWhenConnected { c ->
+                    c.seekTo(0)
+                    c.play()
+                }
             }
             else -> next()
         }
     }
 
-    fun updatePosition() {
-        val player = exoPlayer ?: return
-        _currentPosition.value = player.currentPosition
-        _duration.value = player.duration.coerceAtLeast(0)
-        maybeSavePosition()
-    }
-
     /**
-     * 把当前进度写回数据库，但限频。
-     * 这个方法被 500ms 的进度循环调用，直接写库会变成每秒两次磁盘写；
-     * 每 [SAVE_INTERVAL_MS] 落一次盘，对"下次从哪继续"完全够用。
+     * 刷新进度快照，供 UI 轮询调用。
+     *
+     * 进度落库已经搬到 [PlaybackService]，这里只更新给界面看的两个值。
      */
-    private fun maybeSavePosition() {
-        val player = exoPlayer ?: return
-        val video = _playlist.value.getOrNull(_currentIndex.value) ?: return
-        val now = System.currentTimeMillis()
-        if (now - lastSavedAt < SAVE_INTERVAL_MS) return
-        val pos = player.currentPosition
-        // 播到片尾时不要留下"接近结尾"的进度，否则下次进来会续在最后几秒
-        val total = player.duration
-        val toSave = if (total > 0 && pos >= total * RESUME_END_RATIO) 0L else pos
-        lastSavedAt = now
-        viewModelScope.launch { repository.updatePlaybackPosition(video.id, toSave) }
+    fun updatePosition() {
+        val c = controller ?: return
+        _currentPosition.value = c.currentPosition
+        _duration.value = c.duration.coerceAtLeast(0)
+    }
+
+    // ==================== 前后台 ====================
+
+    /** 是不是"我们主动因为切后台而暂停的"，用来区分用户自己按的暂停 */
+    private var pausedByBackground = false
+
+    /**
+     * 切到后台时暂停解码。
+     *
+     * P2-1 之后播放器在 Service 里，技术上切后台完全可以继续播。这里仍然选择暂停，
+     * 原因：这是本地视频播放器，切后台时用户看不见画面，继续解码只换来发热和耗电
+     * ——正是用户最初提的那个问题。Service 的价值在这里体现为"进程不被随手杀掉、
+     * 通知栏与锁屏可控、回到前台无缝接上"，而不是"故意在后台烧电"。
+     *
+     * 用 pause 而不是 stop：保留 MediaItem 与进度，回前台直接 play 就能接上。
+     */
+    fun pauseForBackground() {
+        val c = controller ?: return
+        if (!c.isPlaying) return
+        pausedByBackground = true
+        c.pause()
+        Log.i(TAG, "切到后台，暂停解码")
+    }
+
+    /** 回到前台恢复播放——只恢复我们自己暂停的那次 */
+    fun resumeFromBackground() {
+        if (!pausedByBackground) return
+        pausedByBackground = false
+        val c = controller ?: return
+        if (c.playbackState == Player.STATE_READY || c.playbackState == Player.STATE_BUFFERING) {
+            c.play()
+            Log.i(TAG, "回到前台，恢复播放")
+        }
     }
 
     /**
-     * 立即落盘一次进度。退出播放页、进入后台时调用——
-     * 这种情况下等不到下一次 5 秒节流窗口，不写就等于丢掉最后几秒的观看进度。
+     * 立即落盘一次进度。
+     *
+     * Service 那边有自己的 5 秒节流，退出播放页时等不到那个窗口，
+     * 这里补一次：把 controller 上的当前位置直接写库。
      */
     fun savePositionNow() {
-        val player = exoPlayer ?: return
+        val c = controller ?: return
         val video = _playlist.value.getOrNull(_currentIndex.value) ?: return
-        val pos = player.currentPosition
-        val total = player.duration
+        val pos = c.currentPosition
+        val total = c.duration
         val toSave = if (total > 0 && pos >= total * RESUME_END_RATIO) 0L else pos
-        lastSavedAt = System.currentTimeMillis()
         viewModelScope.launch { repository.updatePlaybackPosition(video.id, toSave) }
     }
 
     override fun onCleared() {
         super.onCleared()
-        exoPlayer?.release()
-        exoPlayer = null
+        pendingActions.clear()
+        // 只释放 controller（断开与本 UI 的连接），播放器本体归 Service。
+        // 这样退出播放页不会打断正在后台继续的播放。
+        _player.value = null
+        controller?.release()
+        controller = null
     }
 }
 

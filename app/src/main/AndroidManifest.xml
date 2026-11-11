@@ -16,6 +16,17 @@
     <!-- Android 13+ 视频读取权限 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
+    <!--
+        播放器前台 Service（media3 MediaSessionService）。
+        Android 14（targetSdk ≥ 34）起前台服务必须声明类型，播放音频/视频用 mediaPlayback。
+        缺这条会抛 MissingForegroundServiceTypeException：启动即崩。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- 通知栏与锁屏的播放控制 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- 旧版存储权限 -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
@@ -47,6 +58,22 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            播放器 Service：持有 ExoPlayer 的所有权。
+            播放器放在这里而不是 ViewModel 里，是为了让播放脱离播放页的生命周期：
+            退出播放页、切后台、系统回收 Activity 都不会打断正在进行的播放。
+            foregroundServiceType=mediaPlayback 与上面的权限声明配套，
+            Android 14 起缺一不可。
+        -->
+        <service
+            android:name=".playback.PlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>

@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
@@ -98,6 +99,10 @@ internal fun PlayerContent(
 
     var lastTapTime by remember { mutableLongStateOf(0L) }
 
+    // 播放器实例由 Service 持有，连上是异步的。订阅它：连上那一刻触发重组，
+    // update 块把 PlayerView 补绑上去。
+    val mediaPlayer by viewModel.player.collectAsState()
+
     AndroidView(
         factory = { ctx ->
             androidx.media3.ui.PlayerView(ctx).apply {
@@ -108,8 +113,12 @@ internal fun PlayerContent(
                 )
             }
         },
-        // 这一行不能少：把 PlayerView 重新绑到当前的 ExoPlayer 实例上
-        update = { playerView -> playerView.player = viewModel.exoPlayer },
+        // 这一行不能少：把 PlayerView 重新绑到当前的播放器实例上。
+        //
+        // P2-1 之后播放器归 PlaybackService 所有，这里拿到的是 MediaController，
+        // 连上是异步的。mediaPlayer 是 StateFlow，连上那一刻重组、update 重跑，
+        // 把 PlayerView 补绑上去——否则组合时还没连上，画面会永远黑着。
+        update = { playerView -> playerView.player = mediaPlayer },
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)

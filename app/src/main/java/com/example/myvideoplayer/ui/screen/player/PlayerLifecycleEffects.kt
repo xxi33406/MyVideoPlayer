@@ -120,23 +120,26 @@ internal fun PlayerLifecycleEffects(
         }
     }
 
-    // ---- 后台暂停解码 ----
-    // 上面那段只停掉了 UI 的进度轮询，播放器本身仍在全速解码：实测切后台
-    // 30 秒 CPU 时间增加 9.17 秒（约 30%），top -H 显示 MediaCodec_loop 11.1%
-    // + ExoPlayer:PlaybackThread 7.4% —— 用户看不到画面，解码器却在满负荷跑。
+    // ---- 前后台切换：不再主动暂停 ----
     //
-    // 暂停而不是 stop()：保留 MediaItem 与进度，切回来自动接上。
-    // P2-1 的 MediaSession + Service 做完之后，这里会改成交给 Service 继续播。
+    // P0-3 时这里写的是「切后台就 pauseForBackground()」，理由是当时播放器归
+    // PlayerViewModel 所有：切到后台看不见画面，解码器却仍满负荷跑，实测 30 秒
+    // 烧掉 9.17 秒 CPU（约 30%），主动暂停降到 0.17%。
+    //
+    // P2-1 之后播放器搬进 PlaybackService（前台服务 + MediaSession），这个判断
+    // 要反过来：**继续播才是正确行为**。
+    //   - 用户能听到声音，知道自己没关，不是"看不见的浪费"；
+    //   - 通知栏与锁屏有完整的播放控制，不想听随时能停；
+    //   - 从最近任务划掉 App 时 PlaybackService.onTaskRemoved 会收尾；
+    //   - 播完最后一个视频，Service 自然停下。
+    // 如果这里继续强行暂停，Service 就只剩下"进程不被随手杀掉"这一点用处，
+    // 锁屏/通知栏控制也变得没有意义（放不出声音）。
+    //
+    // 只保留一件事：离开播放页时把进度存一次，别丢最后几秒。
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP -> {
-                    if (viewModel.isPlaying.value) {
-                        viewModel.savePositionNow()
-                        viewModel.pauseForBackground()
-                    }
-                }
-                Lifecycle.Event.ON_START -> viewModel.resumeFromBackground()
+                Lifecycle.Event.ON_STOP -> viewModel.savePositionNow()
                 else -> Unit
             }
         }

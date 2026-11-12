@@ -83,9 +83,9 @@ fun PlayerScreen(
     val isPlaying by viewModel.isPlaying.collectAsState()
     val loopMode by viewModel.loopMode.collectAsState()
     val isFastForward by viewModel.isFastForward.collectAsState()
-    // 倍速只有 ViewModel 一份状态：原来 UI 里还有一份 currentSpeed，长按调速时
-    // 两个一起改，谁也不知道以谁为准，HUD 显示与实际播放速度可能不一致。
-    val currentSpeed by viewModel.playbackSpeed.collectAsState()
+    // playbackSpeed 同理：长按调速时它每收到一个 pointer move 就变一次，
+    // 在这一层订阅会让整页（AndroidView、控制条、侧栏）跟着重组几百次，
+    // 表现就是"开倍速会卡"。现在由 SpeedHud 自己订阅，只有那个小 HUD 重组。
     val currentIndex by viewModel.currentIndex.collectAsState()
     val playlist by viewModel.playlist.collectAsState()
     val allPlaylists by mainViewModel.playlists.collectAsState()
@@ -161,7 +161,7 @@ fun PlayerScreen(
 
         SpeedHud(
             visible = showSpeedIndicator,
-            speed = currentSpeed,
+            viewModel = viewModel,
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 24.dp)
         )
 

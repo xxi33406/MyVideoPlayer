@@ -29,6 +29,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.myvideoplayer.ui.viewmodel.PlayerViewModel
 import kotlin.math.abs
 
 /**
@@ -82,9 +85,19 @@ internal fun PlayerTitleOverlay(visible: Boolean, title: String, modifier: Modif
  * 原来放在左上角，32sp 裸数字（整数时 formatSpeed 返回 "3" 而不是 "3x"），
  * 还常驻一行 11sp 的「上下滑调速」，等于把调试信息压在画面上，看视频时视线
  * 每次都会被它拽走。现在改成靠右侧边缘的轻量刻度，遮挡更低，且松手即消失。
+ *
+ * 倍速在这里自己订阅，不从 [PlayerScreen] 传下来：长按调速时倍速每变化一次
+ * 都会触发重组，订阅放在播放页顶层等于让整页（含 AndroidView、控制条、侧栏）
+ * 跟着重组几百次，画面就卡了。现在只有这个 HUD 自己重组。
  */
 @Composable
-internal fun SpeedHud(visible: Boolean, speed: Float, modifier: Modifier = Modifier) {
+internal fun SpeedHud(visible: Boolean, viewModel: PlayerViewModel, modifier: Modifier = Modifier) {
+    val speed by viewModel.playbackSpeed.collectAsState()
+    SpeedHudContent(visible = visible, speed = speed, modifier = modifier)
+}
+
+@Composable
+private fun SpeedHudContent(visible: Boolean, speed: Float, modifier: Modifier = Modifier) {
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(),

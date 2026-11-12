@@ -309,6 +309,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 设置任意播放速度 */
     fun setSpeed(speed: Float) {
         val clampedSpeed = speed.coerceIn(0.5f, 5f)
+        // 同值直接返回：长按调速时手势循环每收到一个 pointer move 就调一次，
+        // 实测拖动 2 秒能触发两百多次；而档位已经量化到 0.5x 一档
+        // （2x~5x 只有 7 个取值），跳过重复值不会让调速变迟钝。
+        if (_playbackSpeed.value == clampedSpeed) return
         _playbackSpeed.value = clampedSpeed
         runWhenConnected { it.setPlaybackSpeed(clampedSpeed) }
     }

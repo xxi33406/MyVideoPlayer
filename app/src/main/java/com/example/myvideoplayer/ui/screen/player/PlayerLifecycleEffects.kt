@@ -13,6 +13,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.example.myvideoplayer.playback.PlaybackUiState
 import com.example.myvideoplayer.ui.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -48,8 +49,12 @@ internal fun PlayerLifecycleEffects(
 
     // ---- 方向：进来自动横屏，退出复位 ----
     DisposableEffect(Unit) {
+        // 标记播放页活着：Service 靠这个判断能不能在空闲时自停。
+        // 必须和下面的 detach 成对，所以放在同一个 DisposableEffect 里。
+        PlaybackUiState.attach()
         activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         onDispose {
+            PlaybackUiState.detach()
             // 方向复位必须在最前，且与 stop() 互相独立。
             // 原来写成 onDispose { viewModel.stop(); PORTRAIT }，一旦 stop() 抛异常
             // （播放器已 release），复位那句永远执行不到，表现就是"退出后仍横屏"。

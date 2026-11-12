@@ -63,6 +63,19 @@ class PlaybackService : MediaSessionService() {
     /** 上次落库时间，用于节流 */
     private var lastSavedAt = 0L
 
+    /**
+     * 空闲自停的计时协程。
+     *
+     * 播放器停下来（暂停、播完、出错）之后，这个 Service 连同它持有的
+     * ExoPlayer、MediaCodec、MediaSession 会一直活着——实测退出播放页后
+     * 进程 PSS 比"只启动不播放"高约 25MB，解码器线程也没释放。
+     *
+     * 用户只是退出播放页而不是要后台听，没有任何东西需要它继续活着。
+     * 所以停够 [IDLE_STOP_DELAY_MS] 就自行 stopSelf()，把内存还给系统；
+     * 下次播放时 ViewModel 重新 connect() 会拉起一个全新的 Service。
+     */
+    private var idleJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
 
@@ -87,16 +100,47 @@ class PlaybackService : MediaSessionService() {
 
                 addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
-                        if (isPlaying) startProgressSaver() else stopProgressSaver(save = true)
+                        if (isPlaying) {
+                            cancelIdleStop()
+                            startProgressSaver()
+                        } else {
+                            stopProgressSaver(save = true)
+                            // 也调度一次：退出播放页时 onDispose 走的是
+                            // stop() + clearMediaItems()，只触发 isPlaying=false 和
+                            // STATE_IDLE，不触发 playWhenReady 变化、也不是 STATE_ENDED。
+                            // 不在这里调度，那条最常见的退出路径就永远等不到自停。
+                            scheduleIdleStop()
+                        }
+                    }
+
+                    /**
+                     * 用 playWhenReady 区分「用户还想播」与「用户不想播了」。
+                     *
+                     * 一开始只靠 isPlaying 判断，实测踩了两个坑：
+                     * 1. 一个文件夹里连着几个十几秒的短视频，播完自动切下一集，
+                     *    切集瞬间 isPlaying 短暂变 false，被当成"用户暂停"，倒计时
+                     *    启动，几十秒后 Service 自杀——表现为"后台播着播着没声了"。
+                     * 2. 用户在播放页主动暂停后退出，isPlaying 早就是 false，
+                     *    不再有事件，倒计时永远等不到。
+                     *
+                     * 真正的判据放在 [scheduleIdleStop] 的循环里（每轮重新读
+                     * playWhenReady 与 mediaItemCount），这里只负责"有事发生就调度"。
+                     */
+                    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                        if (playWhenReady) cancelIdleStop() else scheduleIdleStop()
                     }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_ENDED) stopProgressSaver(save = true)
+                        if (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE) {
+                            stopProgressSaver(save = true)
+                            scheduleIdleStop()
+                        }
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
                         Log.e(TAG, "播放失败: ${error.errorCodeName} - ${error.message}", error)
                         stopProgressSaver(save = true)
+                        scheduleIdleStop()
                     }
                 })
             }
@@ -154,6 +198,57 @@ class PlaybackService : MediaSessionService() {
         if (save) saveProgress(force = true)
     }
 
+    // ==================== 空闲自停 ====================
+
+    /**
+     * 播放器停下后开始倒计时，到期就停掉 Service。
+     *
+     * 为什么要延迟而不是立刻停：暂停后再播放（比如切去别的 App 看一眼又回来）
+     * 应当立刻接着放，不该重新创建 ExoPlayer。延迟一段时间覆盖这种短暂离开。
+     *
+     * 判据是三个条件的组合，任何一个写错都会导致「该停的没停」或「不该停的停了」：
+     * 1. `mediaItemCount == 0`：退出播放页时 PlayerLifecycleEffects 的 onDispose
+     *    会调 `viewModel.stop()`，那里做了 `stop() + clearMediaItems()`，播放器
+     *    被清空但 `playWhenReady` 仍为 true。只看 playWhenReady 会永远等下去。
+     * 2. `playWhenReady == true`：用户还想播（含缓冲、切集间隙），不能停。
+     * 3. [PlaybackUiState] 还挂着：播放页在前台、用户只是按了暂停，停了会让他
+     *    按播放没反应。
+     */
+    private fun scheduleIdleStop() {
+        if (idleJob?.isActive == true) return
+        idleJob = serviceScope.launch {
+            while (true) {
+                delay(IDLE_STOP_DELAY_MS)
+                val player = mediaSession?.player
+
+                // 播放器已被清空：退出播放页时 stop() + clearMediaItems() 的结果，
+                // 明确没有内容要播了，不必再等 UI
+                if (player == null || player.mediaItemCount == 0) {
+                    Log.i(TAG, "播放器已清空，停止 Service 释放播放器")
+                    stopProgressSaver(save = true)
+                    stopSelf()
+                    return@launch
+                }
+
+                // 用户还想播（缓冲中、切集间隙都算），不需要停
+                if (player.playWhenReady) return@launch
+
+                // 播放页仍在前台（用户可能只是按了暂停），继续等，不释放
+                if (PlaybackUiState.isUiAttached()) continue
+
+                Log.i(TAG, "空闲 ${IDLE_STOP_DELAY_MS}ms 且播放页已退出，停止 Service 释放播放器")
+                stopProgressSaver(save = true)
+                stopSelf()
+                return@launch
+            }
+        }
+    }
+
+    private fun cancelIdleStop() {
+        idleJob?.cancel()
+        idleJob = null
+    }
+
     /**
      * 把当前进度写进数据库。
      *
@@ -196,5 +291,14 @@ class PlaybackService : MediaSessionService() {
 
         /** 超过片长这个比例视为看完，下次从头 */
         const val END_RATIO = 0.95
+
+        /**
+         * 停播多久后自停 Service。
+         *
+         * 选 30 秒的依据：覆盖"暂停一下去回微信再回来"这类短暂离开（实测
+         * 切走再切回一般在 10 秒内），又不会让一次正常退出后的 25MB 内存
+         * 白白占太久。比这更短会频繁重建 ExoPlayer，更长则省不下内存。
+         */
+        const val IDLE_STOP_DELAY_MS = 30_000L
     }
 }

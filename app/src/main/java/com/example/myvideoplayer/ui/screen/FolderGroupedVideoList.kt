@@ -11,7 +11,6 @@ import androidx.compose.ui.platform.LocalContext; import androidx.compose.ui.tex
 import androidx.compose.ui.unit.dp; import androidx.compose.ui.unit.sp
 import com.example.myvideoplayer.data.entity.VideoEntity
 import com.example.myvideoplayer.util.ThumbnailCache
-import java.util.Collections
 
 enum class SortMode { NAME, DATE, SIZE }
 
@@ -28,8 +27,9 @@ fun FolderGroupedVideoList(
     var sortMode by remember { mutableStateOf(SortMode.NAME) }
     var ascending by remember { mutableStateOf(true) }
 
-    // 持久化折叠状态（本会话内）
-    val collapsedFolders = remember { Collections.synchronizedSet(mutableSetOf<String>()) }
+    // 折叠状态（本会话内）。必须用 snapshot 支持的集合：普通 Set 改动不会触发重组，
+    // 折叠/展开时 item 列表不会重新构建。
+    val collapsedFolders = remember { mutableStateMapOf<String, Boolean>() }
 
     val groups = remember(videos, sortMode, ascending) {
         videos.groupBy { it.folderName.ifEmpty { extractParentFolder(it.path) } }.map { (k, v) ->
@@ -60,10 +60,32 @@ fun FolderGroupedVideoList(
         }
 
         LazyColumn(contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            groups.forEachIndexed { _, (folder, folderVideos) ->
-                item(key = "folder_$folder") {
-                    FolderSection(folder, folderVideos, selectedVideos, onToggleSelection, onPlayVideo,
-                        onDeleteVideo, collapsedFolders, sortMode, ascending, onRefreshFolder)
+            groups.forEach { (folder, folderVideos) ->
+                // 标题行单独成一个 item，卡片则按行展开成独立 item。
+                // 此前整个文件夹是一个 item、内部用 Column + forEach 全量布局，
+                // 120 个文件会一次性组合 120 张卡片、并发 120 次取帧请求。
+                item(key = "folder_head_$folder") {
+                    FolderHeader(
+                        folder = folder,
+                        count = folderVideos.size,
+                        expanded = collapsedFolders[folder] != true,
+                        onToggle = { collapsedFolders[folder] = collapsedFolders[folder] != true },
+                        onRefresh = { onRefreshFolder(folder) }
+                    )
+                }
+                if (collapsedFolders[folder] != true) {
+                    folderVideos.chunked(2).forEachIndexed { rowIndex, row ->
+                        item(key = "folder_${folder}_row_$rowIndex") {
+                            VideoRow(
+                                row = row,
+                                allVideos = folderVideos,
+                                selectedVideos = selectedVideos,
+                                onToggleSelection = onToggleSelection,
+                                onPlayVideo = onPlayVideo,
+                                onDeleteVideo = onDeleteVideo
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -80,61 +102,69 @@ private fun SortBtn(label: String, mode: SortMode, cur: SortMode, onClick: (Sort
 }
 
 @Composable
-private fun FolderSection(folder: String, videos: List<VideoEntity>, sel: Set<Long>,
-                           onToggle: (Long) -> Unit, onPlay: (List<VideoEntity>, Int) -> Unit,
-                           onDel: (VideoEntity) -> Unit,
-                           collapsedFolders: MutableSet<String>, sortMode: SortMode, ascending: Boolean,
-                           onRefreshFolder: (String) -> Unit) {
+private fun FolderHeader(
+    folder: String,
+    count: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onRefresh: () -> Unit
+) {
     val name = folder.ifEmpty { "根目录" }
-    var expanded by remember { mutableStateOf(!collapsedFolders.contains(folder)) }
-
-    val sorted = remember(videos, sortMode, ascending) {
-        when (sortMode) {
-            SortMode.NAME -> if (ascending) videos.sortedBy { it.name.lowercase() } else videos.sortedByDescending { it.name.lowercase() }
-            SortMode.DATE -> if (ascending) videos.sortedBy { it.lastPlayedAt } else videos.sortedByDescending { it.lastPlayedAt }
-            SortMode.SIZE -> if (ascending) videos.sortedBy { it.size } else videos.sortedByDescending { it.size }
-        }
-    }
-
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column {
-            Row(Modifier.fillMaxWidth().clickable {
-                expanded = !expanded
-                if (expanded) collapsedFolders.remove(folder) else collapsedFolders.add(folder)
-            }.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = {}, modifier = Modifier.size(22.dp)) {
-                    Icon(if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, null,
-                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                }
-                Icon(Icons.Filled.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${videos.size}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.width(4.dp))
-                IconButton(onClick = { onRefreshFolder(folder) }, modifier = Modifier.size(22.dp)) {
-                    Icon(Icons.Filled.Refresh, "刷新", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
-                }
+        Row(Modifier.fillMaxWidth().clickable { onToggle() }
+            .padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = {}, modifier = Modifier.size(22.dp)) {
+                Icon(if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, null,
+                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
             }
-            AnimatedVisibility(visible = expanded, enter = expandVertically(), exit = shrinkVertically()) {
-                val rows = sorted.chunked(2)
-                Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rows.forEach { row ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            for (video in row) {
-                                Box(Modifier.weight(1f)) {
-                                    ThumbCard(video, sel.contains(video.id),
-                                        onClick = { if (sel.isNotEmpty()) onToggle(video.id) else onPlay(sorted, sorted.indexOf(video).coerceAtLeast(0)) },
-                                        onLongClick = { onToggle(video.id) }, showDel = true, onDel = { onDel(video) }, showRm = false, onRm = {})
-                                }
-                            }
-                            if (row.size == 1) Spacer(Modifier.weight(1f))
-                        }
-                    }
-                }
+            Icon(Icons.Filled.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("$count", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(4.dp))
+            IconButton(onClick = onRefresh, modifier = Modifier.size(22.dp)) {
+                Icon(Icons.Filled.Refresh, "刷新", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
             }
         }
+    }
+}
+
+/**
+ * 文件夹内的一行（最多两张卡片）。
+ * 之所以按行拆成独立 lazy item，而不是整个文件夹一个 item 内部 Column 全量布局：
+ * LazyColumn 只组合可见 item，屏幕外的行不会触发 ThumbCard 的 LaunchedEffect，
+ * 也就不会去解码缩略图。
+ */
+@Composable
+private fun VideoRow(
+    row: List<VideoEntity>,
+    allVideos: List<VideoEntity>,
+    selectedVideos: Set<Long>,
+    onToggleSelection: (Long) -> Unit,
+    onPlayVideo: (List<VideoEntity>, Int) -> Unit,
+    onDeleteVideo: (VideoEntity) -> Unit
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (video in row) {
+            Box(Modifier.weight(1f)) {
+                ThumbCard(
+                    video,
+                    selectedVideos.contains(video.id),
+                    onClick = {
+                        if (selectedVideos.isNotEmpty()) onToggleSelection(video.id)
+                        else onPlayVideo(allVideos, allVideos.indexOf(video).coerceAtLeast(0))
+                    },
+                    onLongClick = { onToggleSelection(video.id) },
+                    showDel = true,
+                    onDel = { onDeleteVideo(video) },
+                    showRm = false,
+                    onRm = {}
+                )
+            }
+        }
+        if (row.size == 1) Spacer(Modifier.weight(1f))
     }
 }
 

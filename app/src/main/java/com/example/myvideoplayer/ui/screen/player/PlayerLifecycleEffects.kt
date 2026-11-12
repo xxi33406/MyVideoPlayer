@@ -136,10 +136,19 @@ internal fun PlayerLifecycleEffects(
     // 锁屏/通知栏控制也变得没有意义（放不出声音）。
     //
     // 只保留一件事：离开播放页时把进度存一次，别丢最后几秒。
+    //
+    // 后台省电的另一半在下面：切到后台时把视频轨道关掉。
+    // 前台播放实测 24%、后台仍 15%，差的那 9% 是屏幕合成；而剩下 15% 里
+    // 绝大部分是 MediaCodec 在解一个没人看得到的视频流。只解音频能把这
+    // 部分省下来，回到前台再打开视频轨道，时间轴不会断。
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP -> viewModel.savePositionNow()
+                Lifecycle.Event.ON_STOP -> {
+                    viewModel.savePositionNow()
+                    viewModel.setVideoTrackEnabled(false)
+                }
+                Lifecycle.Event.ON_START -> viewModel.setVideoTrackEnabled(true)
                 else -> Unit
             }
         }

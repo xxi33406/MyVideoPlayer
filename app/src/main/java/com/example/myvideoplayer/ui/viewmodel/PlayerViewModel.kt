@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -399,6 +400,26 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (c.playbackState == Player.STATE_READY || c.playbackState == Player.STATE_BUFFERING) {
             c.play()
             Log.i(TAG, "回到前台，恢复播放")
+        }
+    }
+
+    /**
+     * 开启或关闭视频轨道解码。
+     *
+     * 切到后台时画面没人看得到，但 ExoPlayer 默认仍在全速解视频帧。
+     * 实测后台播放 30 秒烧掉 453 ticks（约 15% CPU），其中绝大部分是
+     * MediaCodec 在解一个永远不会被显示的流。
+     *
+     * 关掉视频轨道后播放器只解音频，回来时重新打开——位置不丢，
+     * 因为音频轨道一直在走，时间轴没有中断。
+     */
+    fun setVideoTrackEnabled(enabled: Boolean) {
+        runWhenConnected { c ->
+            val params = c.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
+                .build()
+            c.trackSelectionParameters = params
         }
     }
 

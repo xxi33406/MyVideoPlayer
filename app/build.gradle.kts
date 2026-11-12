@@ -87,7 +87,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
 
     // Material Icons Extended
-    implementation(libs.androidx.compose.material.icons.extended)
+    // 只用 material-icons-core：extended 的 AAR 有 35.7MB，本项目只用到 17 个图标，
+    // 缺的 12 个在 ui/icons/AppIcons.kt 里用等效路径数据补上了
+    implementation(libs.androidx.compose.material.icons.core)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

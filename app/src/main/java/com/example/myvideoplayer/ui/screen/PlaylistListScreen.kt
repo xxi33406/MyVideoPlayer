@@ -3,7 +3,11 @@ package com.example.myvideoplayer.ui.screen
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult; import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable; import androidx.compose.foundation.layout.*; import androidx.compose.foundation.lazy.LazyColumn; import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons; import androidx.compose.material.icons.filled.*; import androidx.compose.material3.*; import androidx.compose.runtime.*
+import androidx.compose.material.icons.Icons; import androidx.compose.material.icons.filled.*
+import com.example.myvideoplayer.ui.icons.ChevronRight
+import com.example.myvideoplayer.ui.icons.Compare
+import com.example.myvideoplayer.ui.icons.FolderOpen
+import com.example.myvideoplayer.ui.icons.VideoLibrary; import androidx.compose.material3.*; import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment; import androidx.compose.ui.Modifier; import androidx.compose.ui.text.font.FontWeight; import androidx.compose.ui.text.style.TextOverflow; import androidx.compose.ui.unit.dp
 import com.example.myvideoplayer.data.entity.PlaylistEntity; import com.example.myvideoplayer.ui.viewmodel.MainViewModel; import com.example.myvideoplayer.ui.viewmodel.ScanResult
 

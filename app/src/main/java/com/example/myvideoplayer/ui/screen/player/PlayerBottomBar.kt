@@ -12,12 +12,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Pause
+import com.example.myvideoplayer.ui.icons.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.RepeatOne
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
+import com.example.myvideoplayer.ui.icons.Repeat
+import com.example.myvideoplayer.ui.icons.RepeatOne
+import com.example.myvideoplayer.ui.icons.SkipNext
+import com.example.myvideoplayer.ui.icons.SkipPrevious
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider

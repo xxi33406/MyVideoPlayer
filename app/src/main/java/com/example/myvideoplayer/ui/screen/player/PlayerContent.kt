@@ -1,8 +1,6 @@
 package com.example.myvideoplayer.ui.screen.player
 
 import android.media.AudioManager
-import android.view.ViewGroup
-import android.widget.FrameLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -20,7 +18,7 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.ui.compose.PlayerSurface
 import com.example.myvideoplayer.ui.viewmodel.PlayerViewModel
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
@@ -31,11 +29,12 @@ import kotlin.math.roundToInt
  *
  * 独立成一个文件，是因为这一层有两条容易被改坏的不变量，值得与按钮、侧栏分开看：
  *
- * 1. **AndroidView 必须有 update 块**。factory 只在首次组合时执行一次，写进去的
- *    `player = viewModel.exoPlayer` 会把 PlayerView 永久绑死在"那一刻"的实例上。
- *    P3 把 PlayerViewModel 收束到播放路由后，ExoPlayer 会随路由销毁重建，而
- *    PlayerView 仍指向已 release 的旧实例：画面停在最后一帧，旧 PlayerView 处于
- *    失效状态还会吞掉触摸事件，表现就是"所有按键手势都失效"。
+ * 1. **player 必须从 StateFlow 订阅**。播放器归 Service 所有、连上是异步的，且
+ *    随播放路由销毁重建。曾用 AndroidView 包 PlayerView 手工补绑（factory 一次性
+ *    绑死实例的历史 bug 见 2026-11-12-speed-and-memory-retro.md），现已换成
+ *    androidx.media3.ui.compose.PlayerSurface——它内部自带同样的
+ *    LaunchedEffect(player) 重绑逻辑（旧实例自动 clearVideoSurfaceView），
+ *    这个坑类从源头消除，不再需要手写 update 块。
  *
  * 2. **pointerInput 的 key 只留 density / 音量上限**。原来把 duration 也当 key，
  *    视频时长从 0 变成真实值时（准备完成那一刻）会重建整个手势检测器，正在进行的
@@ -100,25 +99,12 @@ internal fun PlayerContent(
     var lastTapTime by remember { mutableLongStateOf(0L) }
 
     // 播放器实例由 Service 持有，连上是异步的。订阅它：连上那一刻触发重组，
-    // update 块把 PlayerView 补绑上去。
+    // PlayerSurface 内部的 LaunchedEffect(player) 会把 surface 绑到新实例上，
+    // 并对旧实例调 clearVideoSurfaceView（media3 1.10.1 源码 PlayerSurfaceInternal）。
     val mediaPlayer by viewModel.player.collectAsState()
 
-    AndroidView(
-        factory = { ctx ->
-            androidx.media3.ui.PlayerView(ctx).apply {
-                useController = false
-                layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            }
-        },
-        // 这一行不能少：把 PlayerView 重新绑到当前的播放器实例上。
-        //
-        // P2-1 之后播放器归 PlaybackService 所有，这里拿到的是 MediaController，
-        // 连上是异步的。mediaPlayer 是 StateFlow，连上那一刻重组、update 重跑，
-        // 把 PlayerView 补绑上去——否则组合时还没连上，画面会永远黑着。
-        update = { playerView -> playerView.player = mediaPlayer },
+    PlayerSurface(
+        player = mediaPlayer,
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)

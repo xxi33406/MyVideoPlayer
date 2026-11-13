@@ -67,7 +67,8 @@ dependencies {
     // 会抛 "No suitable media source factory found for content type: 2"（2 = HLS），
     // 结果是 m3u8 一定播不了。补上这个模块才与扫描器的扩展名清单自洽。
     implementation(libs.media3.exoplayer.hls)
-    implementation(libs.media3.ui)
+    // Compose 原生视频画面（PlayerSurface）：替代 AndroidView 包装的 PlayerView
+    implementation(libs.media3.ui.compose)
     // MediaSession：把播放器的所有权交给前台 Service，切后台能继续播、
     // 锁屏和通知栏可控。挂在 ViewModel 上的播放器一旦离开播放页就没了。
     implementation(libs.media3.session)

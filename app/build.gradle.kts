@@ -1,9 +1,20 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
+
+// 签名配置从根目录 keystore.properties 读（不进 git，见 .gitignore）。
+// 属性：storeFile / storePassword / keyAlias / keyPassword。
+// 文件缺失时 release 走未签名构建，CI 或别人拉代码也能编过。
+val keystoreProperties = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val hasSigningConfig = keystoreProperties.containsKey("storeFile")
 
 android {
     namespace = "com.example.myvideoplayer"
@@ -23,11 +34,23 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 开启：全量代码收缩 + 混淆。本项目此前 APK 72MB 的主因就是
+            // material-icons-extended 未被收缩（已换 core，见 ui/icons/AppIcons.kt），
+            // 开 R8 后未引用的图标类与库代码会被剪掉，release 体积进一步下降。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasSigningConfig) {
+                signingConfig = signingConfigs.create("release") {
+                    storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                    storePassword = keystoreProperties.getProperty("storePassword")
+                    keyAlias = keystoreProperties.getProperty("keyAlias")
+                    keyPassword = keystoreProperties.getProperty("keyPassword")
+                }
+            }
         }
     }
     compileOptions {

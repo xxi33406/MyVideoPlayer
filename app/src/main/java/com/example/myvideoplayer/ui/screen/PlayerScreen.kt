@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.res.Configuration
 import android.media.AudioManager
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideInVertically
@@ -12,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -27,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -109,15 +113,21 @@ fun PlayerScreen(
     var volume by remember {
         mutableIntStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
     }
+    // 播放页亮度（0..1）。-1 表示还没动过，跟随系统；一旦调过就记住本次会话的值，
+    // 退出播放页时复位回系统值（PlayerLifecycleEffects 的 onDispose）。
+    // 用 window 属性而不是 Settings.System：后者是全局设置，会改掉整个系统的亮度
+    // 并触发系统动画；window 参数只影响本 Activity 的窗口，退出即恢复。
+    var brightness by remember { mutableFloatStateOf(-1f) }
     val currentVideoName = videos.getOrNull(currentIndex)?.name ?: ""
 
-    // 方向、屏幕常亮、进度轮询、后台暂停，全部在另一个文件里
+    // 方向、屏幕常亮、进度轮询、后台暂停、亮度应用与复位，全部在另一个文件里
     PlayerLifecycleEffects(
         viewModel = viewModel,
         isPlaying = isPlaying,
         isFastForward = isFastForward,
         showControls = showControls,
         showVolIndicator = showVolIndicator,
+        brightness = brightness,
         onHideControls = { showControls = false },
         onHideVolumeIndicator = { showVolIndicator = false }
     )
@@ -143,14 +153,22 @@ fun PlayerScreen(
         PlayerContent(
             viewModel = viewModel,
             volume = volume,
+            brightness = brightness,
             onVolumeChange = { volume = it },
+            onBrightnessChange = { brightness = it },
             onVolumeTouched = { showVolIndicator = true },
+            onBrightnessTouched = { showVolIndicator = true },
             onSeekPreview = { target, visible ->
                 seekTargetMs = target
                 showSeekPreview = visible
             },
             onSpeedIndicatorChange = { showSpeedIndicator = it },
-            onToggleControls = { showControls = !showControls }
+            // 单击画面除了切换控制条，还要把侧栏一起收掉——原来侧栏只能靠
+            // 再点一次列表按钮收回，用户点击视频区域时它却还挡在画面上
+            onToggleControls = {
+                showControls = !showControls
+                showSidebar = false
+            }
         )
 
         PlayerTitleOverlay(
@@ -171,26 +189,35 @@ fun PlayerScreen(
             modifier = Modifier.align(Alignment.Center)
         )
 
-        // 左上返回
-        IconButton(
-            onClick = { viewModel.stop(); onBack() },
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(8.dp)
-                .background(Color.Black.copy(0.5f), CircleShape)
+        // 左上返回 / 右上加入列表：跟控制条一起显隐。
+        // 原来这两个按钮常驻在画面上，用户要求沉浸式——单击屏幕才出现。
+        AnimatedVisibility(
+            visible = showControls,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter)
         ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color.White)
-        }
+            Box(Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = { viewModel.stop(); onBack() },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(8.dp)
+                        .background(Color.Black.copy(0.5f), CircleShape)
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color.White)
+                }
 
-        // 右上加入列表
-        IconButton(
-            onClick = { showAddDialog = true },
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(8.dp)
-                .background(Color.Black.copy(0.5f), CircleShape)
-        ) {
-            Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "加入列表", tint = Color.White)
+                IconButton(
+                    onClick = { showAddDialog = true },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .background(Color.Black.copy(0.5f), CircleShape)
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "加入列表", tint = Color.White)
+                }
+            }
         }
 
         VolumeOverlay(

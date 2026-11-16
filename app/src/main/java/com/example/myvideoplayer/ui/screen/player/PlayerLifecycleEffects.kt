@@ -7,12 +7,15 @@ import android.view.WindowManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.media3.ui.compose.state.rememberPresentationState
 import com.example.myvideoplayer.playback.PlaybackUiState
 import com.example.myvideoplayer.ui.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
@@ -40,6 +43,8 @@ internal fun PlayerLifecycleEffects(
     isFastForward: Boolean,
     showControls: Boolean,
     showVolIndicator: Boolean,
+    /** 播放页亮度（0..1）；-1 表示未调过、跟随系统 */
+    brightness: Float,
     onHideControls: () -> Unit,
     onHideVolumeIndicator: () -> Unit
 ) {
@@ -47,12 +52,22 @@ internal fun PlayerLifecycleEffects(
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // ---- 方向：进来自动横屏，退出复位 ----
-    DisposableEffect(Unit) {
+    // ---- 方向：跟随视频比例，退出复位 ----
+    // 竖屏视频（宽<高）开成横屏会让画面缩成中间一条。rememberPresentationState
+    // 给出当前视频的显示尺寸（dp），解出前为 null——此时保持竖屏不动，
+    // 尺寸到了自然切过去。
+    val player by viewModel.player.collectAsState()
+    val presentation = rememberPresentationState(player ?: return)
+    val videoSize = presentation.videoSizeDp
+    DisposableEffect(videoSize) {
         // 标记播放页活着：Service 靠这个判断能不能在空闲时自停。
-        // 必须和下面的 detach 成对，所以放在同一个 DisposableEffect 里。
+        // 必须和 detach 成对，所以放这里。
         PlaybackUiState.attach()
-        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        // videoSizeDp 在解出视频尺寸前是 null（宽或高为 0），此时保持竖屏等尺寸
+        val isLandscapeVideo = (videoSize?.width ?: 0f) > (videoSize?.height ?: 0f)
+        activity.requestedOrientation =
+            if (isLandscapeVideo) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         onDispose {
             PlaybackUiState.detach()
             // 方向复位必须在最前，且与 stop() 互相独立。
@@ -64,6 +79,22 @@ internal fun PlayerLifecycleEffects(
             // 进度循环有 5 秒节流，不补这一次会丢最后几秒
             viewModel.savePositionNow()
             viewModel.stop()
+        }
+    }
+
+    // ---- 亮度：跟随手势值覆盖本窗口，退出播放页恢复系统值 ----
+    // 用 WindowManager.LayoutParams.screenBrightness 而不是 Settings.System：
+    // 前者只影响本 Activity 的窗口，退出即自动还原；后者是全局设置，会改掉
+    // 整个系统的亮度并触发系统设置动画。-1 是 BRIGHTNESS_OVERRIDE_NONE（跟随系统）。
+    DisposableEffect(brightness) {
+        val oldBrightness = activity.window.attributes.screenBrightness
+        activity.window.attributes = activity.window.attributes.apply {
+            screenBrightness = brightness
+        }
+        onDispose {
+            activity.window.attributes = activity.window.attributes.apply {
+                screenBrightness = oldBrightness
+            }
         }
     }
 

@@ -1,6 +1,8 @@
 package com.example.myvideoplayer.ui.screen.player
 
+import android.content.Context
 import android.media.AudioManager
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -24,8 +26,17 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+// 手势判定结果：还没决定 / 横滑快进 / 纵向调亮度音量 / 长按倍速
+private const val MODE_UNDECIDED = 0
+private const val MODE_SEEK = 1
+private const val MODE_VERTICAL = 2
+private const val MODE_LONGPRESS = 3
+
+/** 亮度下限：全黑和纯白都不给，留一点看得见/不刺眼的余地 */
+private const val MIN_BRIGHTNESS = 0.05f
+
 /**
- * 视频画面层：PlayerView 本体 + 两套手势检测。
+ * 视频画面层：PlayerSurface 本体 + 手势检测。
  *
  * 独立成一个文件，是因为这一层有两条容易被改坏的不变量，值得与按钮、侧栏分开看：
  *
@@ -41,30 +52,41 @@ import kotlin.math.roundToInt
  *    拖动被凭空取消，用户表现为"滑到一半没反应了"。实时进度与音量改在回调里
  *    即时读取，不进 key。
  *
- * 手势分区：左 80% 主区域（横滑快进 / 长按倍速 / 单击切控制条 / 双击播放暂停），
- * 右 20% 音量区（上下滑调 STREAM_MUSIC）。
+ * 手势分区（单 handler + 轴锁定，不再是"左 80% / 右 20%"两套）：
+ * - 长按（按下后 500ms 内没有成型的拖动也没有抬指）：倍速，**全屏生效**——
+ *   原来只在左 80% 生效，右半屏按下去没反应；
+ * - 横滑：快进，两侧都生效；
+ * - 纵滑：左半屏调亮度，右半屏调音量——先动哪个轴就锁哪个轴，之后不再换；
+ * - 单击：切换控制条；350ms 内两次：播放/暂停。原来右 20% 音量区的单击双击
+ *   直接被丢弃，用户点那儿什么都不会发生。
  */
 @Composable
 internal fun PlayerContent(
     viewModel: PlayerViewModel,
     /** 当前音量，由父层持有，这里只读 */
     volume: Int,
+    /** 当前窗口亮度（0..1）；-1 表示还没调过、跟随系统 */
+    brightness: Float,
     onVolumeChange: (Int) -> Unit,
+    onBrightnessChange: (Float) -> Unit,
     onVolumeTouched: () -> Unit,
+    onBrightnessTouched: () -> Unit,
     onSeekPreview: (targetMs: Long, visible: Boolean) -> Unit,
     onSpeedIndicatorChange: (visible: Boolean) -> Unit,
     onToggleControls: () -> Unit
 ) {
     val density = LocalDensity.current
-    val audioManager = LocalContext.current.getSystemService(AudioManager::class.java)
+    val context = LocalContext.current
+    val audioManager = context.getSystemService(AudioManager::class.java)
     val maxVolume = remember(audioManager) {
         audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
     }
 
-    // 手势 lambda 在 pointerInput 里被捕获，直接读 volume 会读到捕获那一刻的旧值。
-    // rememberUpdatedState 让它每次都读到最新值，同时不把 volume 放进 key
-    // （放进去会导致每调一次音量就重建手势检测器，拖动直接断掉）。
+    // 手势 lambda 在 pointerInput 里被捕获，直接读 volume / brightness 会读到捕获
+    // 那一刻的旧值。rememberUpdatedState 让它每次都读到最新值，同时不把它们放进
+    // key（放进去会导致每调一次音量/亮度就重建手势检测器，拖动直接断掉）。
     val currentVolume by rememberUpdatedState(volume)
+    val currentBrightness by rememberUpdatedState(brightness)
 
     // 手势里要读"最新"的进度，但不能为了它们订阅 StateFlow（那会把整页拉进
     // 每 500ms 一次的重组）。StateFlow.value 是线程安全的即时快照。
@@ -108,28 +130,59 @@ internal fun PlayerContent(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            // 左 80%：横滑快进 + 长按倍速 + 单击/双击
-            .pointerInput(density) {
+            .pointerInput(density, maxVolume) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
                     val startX = down.position.x
                     val startY = down.position.y
                     val w = size.width.toFloat()
-                    if (startX > w * 0.8f) return@awaitEachGesture // 归音量区管
-                    down.consume()
-
-                    var isSeek = false
+                    // 右半屏纵向调音量，左半屏纵向调亮度；横滑快进两侧都管
+                    val isRightZone = startX >= w * 0.5f
+                    var mode = MODE_UNDECIDED
                     var seekTargetMs = 0L
-                    // 500ms 内抬指算点击，超时算长按。
-                    // 用"超时"区分而不是另起一个计时器并发判断，省掉一份状态。
-                    val result = withTimeoutOrNull(500L) {
-                        while (true) {
-                            val ev = awaitPointerEvent()
-                            val ch = ev.changes.firstOrNull() ?: break
-                            if (ch.changedToUp()) { ch.consume(); break }
-                            val dx = ch.position.x - startX
-                            if (abs(dx) > 30f) {
-                                isSeek = true
+
+                    while (true) {
+                        // 每个事件各自带 500ms 超时：手势还没定性且一直没动静，
+                        // 就是长按倍速（全屏生效）。注意超时只取消这一次 await、
+                        // 不取消整个手势循环，拖到一半停住也不会被误判成长按——
+                        // mode 已锁定后超时分支什么都不做，继续等下一个事件。
+                        val ev = withTimeoutOrNull(500L) { awaitPointerEvent() }
+                        if (ev == null) {
+                            if (mode == MODE_UNDECIDED) {
+                                mode = MODE_LONGPRESS
+                                // 走 startFastForward/stopFastForward 而不是直接
+                                // setSpeed —— 只有经过这一对方法 isFastForward
+                                // 才会被置位，控制条"长按期间不自动隐藏"的逻辑
+                                // 才有判断依据。
+                                viewModel.startFastForward()
+                                onSpeedIndicatorChange(true)
+                            }
+                            continue
+                        }
+                        val ch = ev.changes.firstOrNull() ?: break
+                        if (ch.changedToUp()) { ch.consume(); break }
+
+                        if (mode == MODE_LONGPRESS) {
+                            val dpDy = with(density) { (startY - ch.position.y).toDp().value }
+                            // 默认 3x，上滑加速下滑减速，20dp 一档 0.5x，范围 2x~5x
+                            val raw = 3f + (dpDy / 20f) * 0.5f
+                            val speed = ((raw.coerceIn(2f, 5f) * 2f).roundToInt() / 2f)
+                                .toFloat().coerceIn(2f, 5f)
+                            viewModel.setSpeed(speed)
+                            continue
+                        }
+
+                        val dx = ch.position.x - startX
+                        val dy = ch.position.y - startY
+                        if (mode == MODE_UNDECIDED) {
+                            // 先动哪个轴就锁哪个轴，之后不再换——
+                            // 避免"斜着滑又想快进又想调音量"的抖动
+                            if (abs(dx) > 30f) mode = MODE_SEEK
+                            else if (abs(dy) > 30f) mode = MODE_VERTICAL
+                        }
+                        when (mode) {
+                            MODE_SEEK -> {
                                 // 横滑距离换算成跳转量，比例按视频时长自适应
                                 val dpDx = with(density) { dx.toDp().value }
                                 val msPerDp = seekMsPerDp(w)
@@ -137,35 +190,50 @@ internal fun PlayerContent(
                                     .coerceIn(0, latestDuration().coerceAtLeast(0))
                                 onSeekPreview(seekTargetMs, true)
                             }
+                            MODE_VERTICAL -> {
+                                if (isRightZone) {
+                                    // 20px 一档：再灵敏一点就会一滑到底
+                                    val newV = (currentVolume -
+                                        ((ch.position.y - ch.previousPosition.y) / 20f).roundToInt())
+                                        .coerceIn(0, maxVolume)
+                                    if (newV != currentVolume) {
+                                        onVolumeChange(newV)
+                                        audioManager.setStreamVolume(
+                                            AudioManager.STREAM_MUSIC, newV, 0
+                                        )
+                                        onVolumeTouched()
+                                    }
+                                } else {
+                                    // 满屏行程：从按下位置上滑满一屏 = 最亮，下滑满一屏 = 最暗
+                                    val base = if (currentBrightness < 0f) {
+                                        systemBrightness(context)
+                                    } else {
+                                        currentBrightness
+                                    }
+                                    val newB = (base + (startY - ch.position.y) / size.height)
+                                        .coerceIn(MIN_BRIGHTNESS, 1f)
+                                    if (newB != currentBrightness) {
+                                        onBrightnessChange(newB)
+                                        onBrightnessTouched()
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    if (isSeek) {
-                        viewModel.seekTo(seekTargetMs)
-                        onSeekPreview(0L, false)
-                    } else if (result == null) {
-                        // 长按：倍速。走 startFastForward/stopFastForward 而不是直接
-                        // setSpeed —— 只有经过这一对方法 isFastForward 才会被置位，
-                        // 控制条"长按期间不自动隐藏"的逻辑才有判断依据。
-                        viewModel.startFastForward()
-                        onSpeedIndicatorChange(true)
-                        try {
-                            while (true) {
-                                val ev = awaitPointerEvent()
-                                val ch = ev.changes.firstOrNull() ?: break
-                                if (ch.changedToUp()) { ch.consume(); break }
-                                val dpDy = with(density) { (startY - ch.position.y).toDp().value }
-                                // 默认 3x，上滑加速下滑减速，20dp 一档 0.5x，范围 2x~5x
-                                val raw = 3f + (dpDy / 20f) * 0.5f
-                                val speed = ((raw.coerceIn(2f, 5f) * 2f).roundToInt() / 2f)
-                                    .toFloat().coerceIn(2f, 5f)
-                                viewModel.setSpeed(speed)
-                            }
-                        } finally {
+                    // 手势收尾：各模式各回各家
+                    when (mode) {
+                        MODE_SEEK -> {
+                            viewModel.seekTo(seekTargetMs)
+                            onSeekPreview(0L, false)
+                        }
+                        MODE_LONGPRESS -> {
                             onSpeedIndicatorChange(false)
                             viewModel.stopFastForward()
                         }
-                    } else {
+                    }
+                    if (mode == MODE_UNDECIDED) {
+                        // 点击：350ms 内第二次算双击
                         val now = System.currentTimeMillis()
                         if (now - lastTapTime < 350) {
                             viewModel.playPause() // 双击
@@ -177,37 +245,20 @@ internal fun PlayerContent(
                     }
                 }
             }
-            // 右 20%：上下滑调音量
-            .pointerInput(maxVolume) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    val w = size.width.toFloat()
-                    if (down.position.x < w * 0.8f) return@awaitEachGesture
-                    down.consume()
-                    var moved = false
-                    try {
-                        while (true) {
-                            val ev = awaitPointerEvent()
-                            val ch = ev.changes.firstOrNull() ?: break
-                            if (ch.changedToUp()) { ch.consume(); break }
-                            val dy = ch.position.y - ch.previousPosition.y
-                            // 20px 一档：再灵敏一点就会一滑到底
-                            val newV = (currentVolume - (dy / 20f).roundToInt())
-                                .coerceIn(0, maxVolume)
-                            if (newV != currentVolume) {
-                                onVolumeChange(newV)
-                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newV, 0)
-                                onVolumeTouched()
-                                moved = true
-                            }
-                        }
-                    } finally {
-                        // 松手后交给父层的 LaunchedEffect 延迟隐藏
-                        if (moved) onVolumeTouched()
-                    }
-                }
-            }
     )
+}
+
+/**
+ * 系统亮度（0..1）。
+ *
+ * 窗口还没被覆盖过亮度时（BRIGHTNESS_OVERRIDE_NONE = -1），第一次调亮度需要
+ * 一个起点，就从系统设置读真实值；部分设备读不到时退回中间值。
+ */
+private fun systemBrightness(context: Context): Float = try {
+    Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+        .coerceIn(8, 255) / 255f
+} catch (e: Exception) {
+    0.5f
 }
 
 /**

@@ -57,24 +57,37 @@ internal fun PlayerBottomBar(
         Modifier
             .fillMaxWidth()
             .background(Color.Black.copy(0.75f))
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
     ) {
         val progress = if (duration > 0) currentPosition.toFloat() / duration else 0f
-        Slider(
-            value = progress,
-            onValueChange = { viewModel.seekTo((it * duration).toLong()) },
-            modifier = Modifier.fillMaxWidth(),
-            colors = SliderDefaults.colors(
-                thumbColor = Color.White,
-                activeTrackColor = Color.White,
-                inactiveTrackColor = Color.White.copy(0.3f)
+        // 时间直接挤在滑块两侧：原来单独占一行 + 6dp 间隔，黑框整体高了一大截
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                formatTime(currentPosition),
+                color = Color.White,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(end = 8.dp)
             )
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatTime(currentPosition), color = Color.White, fontSize = 12.sp)
-            Text(formatTime(duration), color = Color.White, fontSize = 12.sp)
+            Slider(
+                value = progress,
+                onValueChange = { viewModel.seekTo((it * duration).toLong()) },
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White,
+                    inactiveTrackColor = Color.White.copy(0.3f)
+                )
+            )
+            Text(
+                formatTime(duration),
+                color = Color.White,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(start = 8.dp)
+            )
         }
-        Spacer(Modifier.height(6.dp))
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,

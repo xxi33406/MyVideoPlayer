@@ -97,7 +97,7 @@ fun FolderGroupedVideoList(
                         item(key = "folder_${folder}_row_$rowIndex") {
                             VideoRow(
                                 row = row,
-                                allVideos = folderVideos,
+                                allVideos = videos,
                                 selectedVideos = selectedVideos,
                                 onToggleSelection = onToggleSelection,
                                 onPlayVideo = onPlayVideo,

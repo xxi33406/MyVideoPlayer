@@ -24,7 +24,10 @@ class VideoRepository(context: Context) {
             val result = FileScanner.scanFolder(context, folderUri)
             videoDao.insertVideos(
                 result.videos.map {
-                    VideoEntity(path = it.path, name = it.name, folderName = result.rootName, size = it.size)
+                    VideoEntity(
+                        path = it.path, name = it.name, folderName = result.rootName,
+                        size = it.size, fileModifiedAt = it.lastModified
+                    )
                 }
             )
             result.rootName to result.videos.size

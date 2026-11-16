@@ -27,7 +27,9 @@ object FileScanner {
         val path: String,
         val uri: Uri,
         val size: Long = 0,
-        val parentFolder: String = ""
+        val parentFolder: String = "",
+        /** 文件修改时间（毫秒），来自 SAF COLUMN_LAST_MODIFIED，时间排序用 */
+        val lastModified: Long = 0
     )
 
     data class ScanResult(
@@ -40,7 +42,8 @@ object FileScanner {
         val docId: String,
         val name: String,
         val isDirectory: Boolean,
-        val size: Long
+        val size: Long,
+        val lastModified: Long
     )
 
     suspend fun scanFolder(context: Context, folderUri: Uri): ScanResult {
@@ -68,7 +71,8 @@ object FileScanner {
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE,
-            DocumentsContract.Document.COLUMN_SIZE
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED
         )
         try {
             context.contentResolver.query(childrenUri, projection, null, null, null)?.use { c ->
@@ -80,7 +84,9 @@ object FileScanner {
                             name = c.getString(1) ?: "",
                             isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR,
                             // 部分 provider 不给 size 列，一律按 0 处理
-                            size = if (c.isNull(3)) 0L else c.getLong(3)
+                            size = if (c.isNull(3)) 0L else c.getLong(3),
+                            // 部分 provider 不给修改时间，同样按 0 处理（排序时沉底）
+                            lastModified = if (c.isNull(4)) 0L else c.getLong(4)
                         )
                     )
                 }
@@ -185,7 +191,10 @@ object FileScanner {
 
     private fun toVideoFile(treeUri: Uri, e: Entry, name: String, parentFolder: String): VideoFile {
         val uri = documentUri(treeUri, e.docId)
-        return VideoFile(name = name, path = uri.toString(), uri = uri, size = e.size, parentFolder = parentFolder)
+        return VideoFile(
+            name = name, path = uri.toString(), uri = uri,
+            size = e.size, parentFolder = parentFolder, lastModified = e.lastModified
+        )
     }
 
     private fun isAudioIndex(name: String): Boolean {

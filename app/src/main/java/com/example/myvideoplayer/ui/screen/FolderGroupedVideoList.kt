@@ -10,7 +10,7 @@ import com.example.myvideoplayer.ui.icons.ArrowUpward
 import com.example.myvideoplayer.ui.icons.ExpandLess
 import com.example.myvideoplayer.ui.icons.ExpandMore
 import com.example.myvideoplayer.ui.icons.Folder
-import androidx.compose.material3.*; import androidx.compose.runtime.*; import androidx.compose.ui.Alignment; import androidx.compose.ui.Modifier
+import androidx.compose.material3.*; import androidx.compose.runtime.*; import androidx.compose.runtime.saveable.rememberSaveable; import androidx.compose.runtime.saveable.Saver; import androidx.compose.ui.Alignment; import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip; import androidx.compose.ui.graphics.Color; import androidx.compose.ui.graphics.asImageBitmap; import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext; import androidx.compose.ui.text.font.FontWeight; import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp; import androidx.compose.ui.unit.sp
@@ -29,18 +29,32 @@ fun FolderGroupedVideoList(
     onRefreshFolder: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var sortMode by remember { mutableStateOf(SortMode.NAME) }
-    var ascending by remember { mutableStateOf(true) }
+    // 排序与折叠状态必须 rememberSaveable：进入播放页时 NavHost 会销毁本组合，
+    // 返回时 remember 的状态全部归零——用户看到的「收起的列表重新展开、排序
+    // 变回名称」就是这么来的。rememberSaveable 走实例状态恢复，能活过这个过程。
+    var sortMode by rememberSaveable { mutableStateOf(SortMode.NAME) }
+    var ascending by rememberSaveable { mutableStateOf(true) }
 
-    // 折叠状态（本会话内）。必须用 snapshot 支持的集合：普通 Set 改动不会触发重组，
+    // 折叠状态。必须用 snapshot 支持的集合：普通 Set 改动不会触发重组，
     // 折叠/展开时 item 列表不会重新构建。
-    val collapsedFolders = remember { mutableStateMapOf<String, Boolean>() }
+    // SnapshotStateMap 本身进不了 Bundle，所以 Saver 只保存「被折叠的文件夹名」，
+    // 恢复时重建成 map（未出现的 key 视为展开，与初始语义一致）。
+    val collapsedFolders = rememberSaveable(
+        saver = Saver(
+            save = { it.filterValues { v -> v }.keys.toList() },
+            restore = { saved ->
+                mutableStateMapOf<String, Boolean>().apply { saved.forEach { k -> this[k] = true } }
+            }
+        )
+    ) { mutableStateMapOf<String, Boolean>() }
 
     val groups = remember(videos, sortMode, ascending) {
         videos.groupBy { it.folderName.ifEmpty { extractParentFolder(it.path) } }.map { (k, v) ->
             val sorted = when (sortMode) {
                 SortMode.NAME -> if (ascending) v.sortedBy { it.name.lowercase() } else v.sortedByDescending { it.name.lowercase() }
-                SortMode.DATE -> if (ascending) v.sortedBy { it.lastPlayedAt } else v.sortedByDescending { it.lastPlayedAt }
+                // 文件自身的修改时间，不是 lastPlayedAt——后者是"最后播放时刻"，
+                // 没播过的视频恒为 0，用它排序用户看到的就是无规律（bug 报告里的"时间排序不对"）
+                SortMode.DATE -> if (ascending) v.sortedBy { it.fileModifiedAt } else v.sortedByDescending { it.fileModifiedAt }
                 SortMode.SIZE -> if (ascending) v.sortedBy { it.size } else v.sortedByDescending { it.size }
             }
             k to sorted

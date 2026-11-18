@@ -61,6 +61,12 @@ fun FolderGroupedVideoList(
         }.sortedBy { it.first }
     }
 
+    // 播放队列顺序 = 界面展示顺序：把分组顺序 + 组内排序拍平成一个序列。
+    // 点击卡片时把它交给播放页（onPlayVideo），侧栏列表与"下一集/上一集"
+    // 就和详情页当前所选的排序（名称/时间/大小 + 升降序）完全一致。
+    // 折叠的组不显示但仍进队列，队列始终完整。
+    val orderedVideos = remember(videos, sortMode, ascending) { groups.flatMap { it.second } }
+
     Column(modifier = modifier) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -97,7 +103,7 @@ fun FolderGroupedVideoList(
                         item(key = "folder_${folder}_row_$rowIndex") {
                             VideoRow(
                                 row = row,
-                                allVideos = videos,
+                                allVideos = orderedVideos,
                                 selectedVideos = selectedVideos,
                                 onToggleSelection = onToggleSelection,
                                 onPlayVideo = onPlayVideo,

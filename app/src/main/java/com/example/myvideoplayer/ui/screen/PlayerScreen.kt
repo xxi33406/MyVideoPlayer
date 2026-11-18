@@ -11,11 +11,13 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -198,25 +200,29 @@ fun PlayerScreen(
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
             Box(Modifier.fillMaxWidth()) {
-                IconButton(
-                    onClick = { viewModel.stop(); onBack() },
+                // 不用 IconButton：它自带圆形涟漪底，叠上黑色圆背景在视频画面上很突兀。
+                // 改成无背景 Icon + clickable，只有图标本身。
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    "返回",
+                    tint = Color.White,
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(8.dp)
-                        .background(Color.Black.copy(0.5f), CircleShape)
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color.White)
-                }
+                        .padding(12.dp)
+                        .size(32.dp)
+                        .clickable { viewModel.stop(); onBack() }
+                )
 
-                IconButton(
-                    onClick = { showAddDialog = true },
+                Icon(
+                    Icons.AutoMirrored.Filled.PlaylistAdd,
+                    "加入列表",
+                    tint = Color.White,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(8.dp)
-                        .background(Color.Black.copy(0.5f), CircleShape)
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "加入列表", tint = Color.White)
-                }
+                        .padding(12.dp)
+                        .size(32.dp)
+                        .clickable { showAddDialog = true }
+                )
             }
         }
 

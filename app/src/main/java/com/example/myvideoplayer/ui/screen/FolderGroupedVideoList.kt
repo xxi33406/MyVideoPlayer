@@ -191,9 +191,9 @@ private fun VideoRow(
 @Composable
 private fun ThumbCard(v: VideoEntity, isSel: Boolean, onClick: ()->Unit, onLongClick: ()->Unit, showDel: Boolean, onDel: ()->Unit, showRm: Boolean, onRm: ()->Unit) {
     val ctx = LocalContext.current
-    // 关键修复：remember 绑定 video.path，排序后不会错位
-    var bmp by remember(v.path) { mutableStateOf(ThumbnailCache.get(v.path)) }
-    LaunchedEffect(v.path) { if (bmp == null) { ThumbnailCache.load(ctx, v.path)?.let { bmp = it } } }
+    // 缓存键带文件修改时间：同一 URI 被覆盖写后旧图自动失效
+    var bmp by remember(v.path, v.fileModifiedAt) { mutableStateOf(ThumbnailCache.get(v.path, v.fileModifiedAt)) }
+    LaunchedEffect(v.path, v.fileModifiedAt) { if (bmp == null) { ThumbnailCache.load(ctx, v.path, v.fileModifiedAt)?.let { bmp = it } } }
     Card(Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick), shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)) {
         Box { Box(Modifier.fillMaxWidth().aspectRatio(16f/9f).clip(RoundedCornerShape(topStart=8.dp,topEnd=8.dp)).background(Color.Black.copy(0.3f)), contentAlignment = Alignment.Center) {

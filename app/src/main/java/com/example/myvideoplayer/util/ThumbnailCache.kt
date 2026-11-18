@@ -68,8 +68,16 @@ object ThumbnailCache {
 
     private val writeCount = AtomicInteger(0)
 
-    /** 同步读内存缓存。列表项首帧渲染时用，拿不到就先显示占位图标。 */
-    fun get(path: String): Bitmap? = memory.get(cacheKey(path))
+    /**
+     * 同步读内存缓存。列表项首帧渲染时用，拿不到就先显示占位图标。
+     *
+     * [fileModifiedAt] 是文件的修改时间（毫秒）。缓存键里必须带上它：
+     * 同一个 content:// URI 被外部 App 覆盖写（换文件内容）后 path 不变，
+     * 只按 path 做键会把旧视频的缩略图一直显示在新视频上。
+     * 修改时间变了 → 键变了 → 旧图自然失效，重新取帧。
+     */
+    fun get(path: String, fileModifiedAt: Long = 0L): Bitmap? =
+        memory.get(cacheKey(path, fileModifiedAt))
 
     /**
      * 是否用低分辨率解码。
@@ -89,13 +97,16 @@ object ThumbnailCache {
         memory.evictAll()
     }
 
-    private fun cacheKey(path: String): String = if (lowPower) "$path#low" else path
+    private fun cacheKey(path: String, fileModifiedAt: Long = 0L): String {
+        val base = if (fileModifiedAt > 0L) "$path@$fileModifiedAt" else path
+        return if (lowPower) "$base#low" else base
+    }
 
     private fun targetW(): Int = if (lowPower) LOW_POWER_W else TARGET_W
     private fun targetH(): Int = if (lowPower) LOW_POWER_H else TARGET_H
 
-    suspend fun load(context: Context, path: String): Bitmap? {
-        val key = cacheKey(path)
+    suspend fun load(context: Context, path: String, fileModifiedAt: Long = 0L): Bitmap? {
+        val key = cacheKey(path, fileModifiedAt)
         memory.get(key)?.let { return it }
         return withContext(Dispatchers.IO) {
             sem.withPermit {

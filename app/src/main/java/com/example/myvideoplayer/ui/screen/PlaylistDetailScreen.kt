@@ -104,8 +104,8 @@ fun PlaylistDetailScreen(vm: MainViewModel, playlist: PlaylistEntity?, onBack: (
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ThumbCard2(v: VideoEntity, isSel: Boolean, onClick: ()->Unit, onLongClick: ()->Unit, showDel: Boolean, onDel: ()->Unit, showRm: Boolean, onRm: ()->Unit) {
-    val ctx = LocalContext.current;     var bmp by remember(v.path) { mutableStateOf(ThumbnailCache.get(v.path)) }
-    LaunchedEffect(v.path) { if (bmp == null) { ThumbnailCache.load(ctx, v.path)?.let { bmp = it } } }
+    val ctx = LocalContext.current;     var bmp by remember(v.path, v.fileModifiedAt) { mutableStateOf(ThumbnailCache.get(v.path, v.fileModifiedAt)) }
+    LaunchedEffect(v.path, v.fileModifiedAt) { if (bmp == null) { ThumbnailCache.load(ctx, v.path, v.fileModifiedAt)?.let { bmp = it } } }
     Card(Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick), shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
         Box { Box(Modifier.fillMaxWidth().height(120.dp).clip(RoundedCornerShape(topStart=12.dp, topEnd=12.dp)).background(Color.Black.copy(0.3f)), contentAlignment = Alignment.Center) {

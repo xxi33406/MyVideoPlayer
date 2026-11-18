@@ -59,15 +59,17 @@ internal fun PlayerLifecycleEffects(
     val player by viewModel.player.collectAsState()
     val presentation = rememberPresentationState(player ?: return)
     val videoSize = presentation.videoSizeDp
-    DisposableEffect(videoSize) {
+
+    // ---- 退出清理：只跑一次 ----
+    // 这个 effect 的 key 必须是 Unit。曾经错误地用 videoSize 当 key：视频尺寸解出
+    // （null -> Size）那一刻 Compose 会先 dispose 旧 effect，onDispose 里的
+    // viewModel.stop() 把刚播了 1.9 秒的播放器直接停掉——用户看到的就是
+    // "进播放页默认暂停，点播放还播错视频"。清理逻辑属于页面生命周期，
+    // 不是视频属性，两者绝不能共用一个 key。
+    DisposableEffect(Unit) {
         // 标记播放页活着：Service 靠这个判断能不能在空闲时自停。
         // 必须和 detach 成对，所以放这里。
         PlaybackUiState.attach()
-        // videoSizeDp 在解出视频尺寸前是 null（宽或高为 0），此时保持竖屏等尺寸
-        val isLandscapeVideo = (videoSize?.width ?: 0f) > (videoSize?.height ?: 0f)
-        activity.requestedOrientation =
-            if (isLandscapeVideo) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         onDispose {
             PlaybackUiState.detach()
             // 方向复位必须在最前，且与 stop() 互相独立。
@@ -80,6 +82,18 @@ internal fun PlayerLifecycleEffects(
             viewModel.savePositionNow()
             viewModel.stop()
         }
+    }
+
+    // ---- 方向跟随视频比例 ----
+    // 只设方向，不挂任何清理。videoSizeDp 解出前是 null（宽或高为 0），
+    // 此时保持竖屏等尺寸；从 null 到有值、或切集换了不同比例的视频，
+    // 都靠这个 effect 的重跑来切方向。
+    DisposableEffect(videoSize) {
+        val isLandscapeVideo = (videoSize?.width ?: 0f) > (videoSize?.height ?: 0f)
+        activity.requestedOrientation =
+            if (isLandscapeVideo) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        onDispose { }
     }
 
     // ---- 亮度：跟随手势值覆盖本窗口，退出播放页恢复系统值 ----

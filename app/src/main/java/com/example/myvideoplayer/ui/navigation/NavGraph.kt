@@ -5,6 +5,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.compose.runtime.remember
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.myvideoplayer.ui.screen.CompareScreen
@@ -83,10 +84,16 @@ fun AppNavGraph() {
             // onCleared，ExoPlayer 当场释放。此前挂在 Activity 级会让播放器实例活到进程结束，
             // 反复进出播放页既不重建也不释放，白占解码器与内存。
             val pvm: PlayerViewModel = viewModel()
+            // 播放列表在进入路由时固化一次，不要在重组里重新读 StateFlow：
+            // 播放期间 last_played_at 落库会让 allVideos 重排，重组一旦读到新引用，
+            // PlayerScreen 的 LaunchedEffect(videos) 就会带着旧 startIndex 重放 setPlaylist，
+            // 用户点一下屏幕就可能跳到列表另一端的视频。从详情页来时 playingVideos
+            // 已由 setPlayingVideos 固化，"全部视频"入口兜底读一次 allVideos。
+            val videos = remember { mvm.playingVideos.value.ifEmpty { mvm.allVideos.value } }
             PlayerScreen(
                 viewModel = pvm,
                 mainViewModel = mvm,
-                videos = mvm.playingVideos.value.ifEmpty { mvm.allVideos.value },
+                videos = videos,
                 startIndex = index,
                 onBack = { nav.popBackStack() }
             )

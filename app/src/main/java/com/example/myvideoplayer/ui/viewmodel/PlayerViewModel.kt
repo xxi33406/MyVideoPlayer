@@ -61,6 +61,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     /** 连接中就需要执行的操作，连上后按序执行 */
     private val pendingActions = ArrayDeque<(MediaController) -> Unit>()
 
+    /** 排队操作里是否包含"要播"的动作（playCurrent）。连接竞态兜底要用 */
+
+    /** onCleared 后禁止再发起连接：release 会触发 onDisconnected，别让它引发重连 */
+    @Volatile
+    private var cleared = false
+
     /** 播放器接口，供 PlayerView 绑定。连上之前为 null，PlayerView 会显示黑屏 */
     private val _player = MutableStateFlow<Player?>(null)
 
@@ -124,6 +130,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
      * 用主线程 executor 回调：MediaController 是给 UI 用的，回调本来就在主线程。
      */
     private fun connect() {
+        if (cleared) return
         val app = getApplication<Application>()
         val token = SessionToken(app, ComponentName(app, PlaybackService::class.java))
         val future = MediaController.Builder(app, token).buildAsync()
@@ -170,6 +177,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 _playbackSpeed.value = playbackParameters.speed
             }
         })
+        // Service 空闲自停会释放 controller。断连后旧实例上的一切命令都无效，
+        // 必须置空让 runWhenConnected 重新排队、并触发重连。
+        // 断连通知不走 Player.Listener：MediaController 被 release 时其 future 已结束，
+        // 我们改为在收到"命令不可用"时感知。可靠钩子：MediaController 的
+        // availableCommands 变化 → COMMAND_PLAY_PAUSE 消失即断连。
+        c.addListener(object : Player.Listener {
+            override fun onAvailableCommandsChanged(availableCommands: androidx.media3.common.Player.Commands) {
+                if (!availableCommands.contains(Player.COMMAND_PLAY_PAUSE) && controller === c) {
+                    Log.w(TAG, "MediaController 命令不可用（Service 自停或被杀），重连")
+                    controller = null
+                    _player.value = null
+                    connect()
+                }
+            }
+        })
     }
 
     /** 连上就立刻执行，没连上就排队 */
@@ -211,6 +233,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch { repository.updateLastPlayedAt(video.id) }
 
         runWhenConnected { c ->
+            schedulePlaybackVerify(c, video)
             try {
                 Log.i(TAG, "开始播放: ${video.name} (${video.path})")
                 // mediaId 存主键：进度落库在 Service 侧做，那边要靠它认视频。
@@ -250,7 +273,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun playPause() {
         runWhenConnected { c ->
-            if (c.isPlaying) c.pause() else c.play()
+            // 防呆：播放器里没有任何条目时不要裸调 play()。
+            // Service 被空闲自停后 MediaController 断连，此时 play() 会走系统的
+            // 媒体按钮"恢复播放"契约（onPlaybackResumption），Service 没实现它，
+            // 实测会抛 UnsupportedOperationException 且播出错误的内容。
+            // 播放器为空说明退出了播放页又进来，重放当前要播的视频才是对的。
+            if (c.mediaItemCount == 0) {
+                playCurrent()
+            } else {
+                if (c.isPlaying) c.pause() else c.play()
+            }
         }
     }
 
@@ -344,6 +376,33 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     // ==================== 内部处理 ====================
+
+    /**
+     * 播放命令"送达校验"。
+     *
+     * 实测竞态：MediaController 已连上、playCurrent 的 setMediaItem/prepare/play 也执行了，
+     * 但 Service 端播放器此时可能还没就绪（SessionToken 刚把被空闲自停杀死的 Service
+     * 重新拉起），命令整体丢失——播放器停在 STATE_NONE、mediaItemCount=0，
+     * UI 显示暂停态，用户点播放又会踩到 playPause 的空播放器路径。
+     *
+     * 对策：下发 800ms 后校验一次，若播放器仍是"空且未准备"就重放当前视频。
+     * 只在目标 video 还是当前视频时才补发，避免误伤用户后续的切集操作。
+     */
+    private fun schedulePlaybackVerify(c: MediaController, video: VideoEntity) {
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            val cc = controller
+            if (cc !== c) return@postDelayed
+            val current = _playlist.value.getOrNull(_currentIndex.value)
+            if (current?.id != video.id) return@postDelayed
+            // STATE_IDLE 但手里有 item = prepare/play 丢失的典型形态
+            // （实测 position 卡在几十毫秒、state 停在 0）。只有完全没收到 item 和
+            // 收到一半这两种都要补发。
+            if (cc.playbackState == Player.STATE_IDLE) {
+                Log.w(TAG, "播放命令丢失（Service 未就绪），重放: ${video.name}")
+                playCurrent()
+            }
+        }, 800)
+    }
 
     private fun handlePlaybackEnded() {
         // 播放列表只有一个视频时，PLAYLIST 模式走 next() 会 (0+1)%1 得到 0，
@@ -439,11 +498,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val pos = c.currentPosition
         val total = c.duration
         val toSave = if (total > 0 && pos >= total * RESUME_END_RATIO) 0L else pos
-        viewModelScope.launch { repository.updatePlaybackPosition(video.id, toSave) }
+        // 不能用 viewModelScope：退出播放页时 onDispose（这里）与 onCleared 同帧发生，
+        // scope 立刻被 cancel，launch 里的写库永远不执行——实测进度 100% 丢失。
+        // GlobalScope 逃逸出 ViewModel 生命周期，只为这一条 UPDATE，代价可忽略。
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { repository.updatePlaybackPosition(video.id, toSave) }
+                .onFailure { Log.w(TAG, "保存进度失败: ${video.name}", it) }
+        }
     }
 
     override fun onCleared() {
         super.onCleared()
+        cleared = true
         pendingActions.clear()
         // 只释放 controller（断开与本 UI 的连接），播放器本体归 Service。
         // 这样退出播放页不会打断正在后台继续的播放。

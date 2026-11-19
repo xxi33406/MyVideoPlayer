@@ -6,7 +6,10 @@ import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -14,6 +17,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.changedToUp
@@ -21,6 +25,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.media3.ui.compose.PlayerSurface
+import androidx.media3.ui.compose.state.rememberPresentationState
 import com.example.myvideoplayer.ui.viewmodel.PlayerViewModel
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
@@ -125,8 +130,20 @@ internal fun PlayerContent(
     // 并对旧实例调 clearVideoSurfaceView（media3 1.10.1 源码 PlayerSurfaceInternal）。
     val mediaPlayer by viewModel.player.collectAsState()
 
-    PlayerSurface(
-        player = mediaPlayer,
+    // 画面比例：PlayerSurface 只是一块 SurfaceView，它不裁剪也不信箱——
+    // 解码输出直接铺满整个 Surface，Surface 又被我们撑满屏幕。
+    // 视频比例和屏幕比例不一致时（竖屏视频在横屏 Surface 上、或反之），
+    // 像素被非等比拉伸，就是用户报的「比例不对被拉伸」。
+    //
+    // 结构分两层（手势必须留在全屏层，缩到信箱盒上的手势会在黑边区失灵）：
+    // - 外层 Box fillMaxSize + 手势 pointerInput：点击/拖动的判定区是整个屏幕；
+    // - 内层 PlayerSurface 套 aspectRatio 比例盒：Surface 缩到「保持视频比例、
+    //   居中、较长一边贴满」，等比缩放的两边之外自然是黑边（外层 Box 的黑底）。
+    // 比例未知（首帧未到 / DB 没存到）时 Surface 退回 fillMaxSize，行为同旧版。
+    val presentation = rememberPresentationState(mediaPlayer)
+    val videoSize = presentation.videoSizeDp
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
@@ -245,7 +262,29 @@ internal fun PlayerContent(
                     }
                 }
             }
-    )
+    ) {
+        // 内层：Surface 套比例盒，BoxScope.align(Alignment.Center) 居中。
+        // fillMaxSize 把约束变成 fixed，aspectRatio 在 fixed 约束下不会缩回
+        // 父边界内（实测 Surface 被撑到 2400x1350，上下各溢 135px 变成裁剪）；
+        // wrapContentSize 先把约束解开成 loose，aspectRatio 才能在父边界内
+        // 选出「比例正确且完整可见」的最大尺寸（16:9 视频在 20:9 屏上是
+        // 1920x1080，左右各 240px 黑边）。
+        val surfaceModifier = if (videoSize != null && videoSize.width > 0f && videoSize.height > 0f) {
+            Modifier
+                .align(Alignment.Center)
+                .fillMaxSize()
+                .wrapContentSize(Alignment.Center)
+                .aspectRatio(
+                    videoSize.width / videoSize.height,
+                    matchHeightConstraintsFirst = videoSize.height > videoSize.width
+                )
+        } else {
+            Modifier
+                .align(Alignment.Center)
+                .fillMaxSize()
+        }
+        PlayerSurface(player = mediaPlayer, modifier = surfaceModifier)
+    }
 }
 
 /**

@@ -25,13 +25,21 @@ object DatabaseMigrations {
         }
     }
 
+    /** v5 → v6：videos 表新增 video_width / video_height 列（播放页方向判断用） */
+    private val MIGRATION_5_6 = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE videos ADD COLUMN video_width INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE videos ADD COLUMN video_height INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
     /**
      * 全部迁移，按顺序传给 [androidx.room.RoomDatabase.Builder.addMigrations]。
      *
-     * 加新迁移的步骤照 [MIGRATION_4_5] 的样子：
+     * 加新迁移的步骤照 [MIGRATION_5_6] 的样子：
      * 1. 在这里写 `private val MIGRATION_旧_新`
      * 2. 加进下面的 [ALL] 数组
      * 3. 构建一次，确认 `app/schemas/` 导出了新版本 JSON 并一起提交
      */
-    val ALL: Array<Migration> = arrayOf(MIGRATION_4_5)
+    val ALL: Array<Migration> = arrayOf(MIGRATION_4_5, MIGRATION_5_6)
 }

@@ -47,5 +47,19 @@ data class VideoEntity(
      * 排出来毫无规律）。文件时间才是用户直觉里的"视频时间"，扫描时入库。
      */
     @ColumnInfo(name = "file_modified_at", defaultValue = "0")
-    val fileModifiedAt: Long = 0
+    val fileModifiedAt: Long = 0,
+
+    /**
+     * 视频宽度（像素），扫描时用 MediaMetadataRetriever 提取。
+     *
+     * 播放页的方向切换靠它：原来方向由 videoSizeDp（首帧解出）驱动，进播放页
+     * 要等第一帧渲染才有尺寸——横屏视频先进竖屏、再跳横屏，闪一下。
+     * 扫描时一次性把宽高存进库，进播放页第一帧合成之前就知道该横还是竖。
+     */
+    @ColumnInfo(name = "video_width", defaultValue = "0")
+    val width: Int = 0,
+
+    /** 视频高度（像素）。与 [width] 配套，见其注释。 */
+    @ColumnInfo(name = "video_height", defaultValue = "0")
+    val height: Int = 0
 )

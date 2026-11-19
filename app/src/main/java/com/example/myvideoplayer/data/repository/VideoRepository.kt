@@ -8,6 +8,7 @@ import com.example.myvideoplayer.data.entity.PlaylistEntity
 import com.example.myvideoplayer.data.entity.PlaylistVideoCrossRef
 import com.example.myvideoplayer.data.entity.VideoEntity
 import com.example.myvideoplayer.util.FileScanner
+import com.example.myvideoplayer.util.VideoMetadata
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -22,11 +23,15 @@ class VideoRepository(context: Context) {
     suspend fun scanAndSaveFolder(context: Context, folderUri: Uri): Pair<String, Int> =
         withContext(Dispatchers.IO) {
             val result = FileScanner.scanFolder(context, folderUri)
+            // 扫描阶段顺带取宽高：播放页方向判断要靠它，若等首帧渲染出来再切方向，
+            // 横屏视频必然"先竖屏闪一下"。失败的视频按 0 处理，方向回落首帧尺寸。
+            val withDims = VideoMetadata.fillDimensions(context, result.videos)
             videoDao.insertVideos(
-                result.videos.map {
+                withDims.map {
                     VideoEntity(
                         path = it.path, name = it.name, folderName = result.rootName,
-                        size = it.size, fileModifiedAt = it.lastModified
+                        size = it.size, fileModifiedAt = it.lastModified,
+                        width = it.width, height = it.height
                     )
                 }
             )

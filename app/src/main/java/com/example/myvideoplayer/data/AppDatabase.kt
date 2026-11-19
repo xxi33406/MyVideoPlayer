@@ -13,7 +13,7 @@ import com.example.myvideoplayer.data.entity.VideoEntity
 
 @Database(
     entities = [PlaylistEntity::class, VideoEntity::class, PlaylistVideoCrossRef::class],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {

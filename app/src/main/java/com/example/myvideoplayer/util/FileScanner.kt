@@ -29,7 +29,11 @@ object FileScanner {
         val size: Long = 0,
         val parentFolder: String = "",
         /** 文件修改时间（毫秒），来自 SAF COLUMN_LAST_MODIFIED，时间排序用 */
-        val lastModified: Long = 0
+        val lastModified: Long = 0,
+        /** 视频宽度（像素）。扫描阶段由 [VideoMetadata.extract] 填充，播放页方向判断用 */
+        val width: Int = 0,
+        /** 视频高度（像素）。与 [width] 配套 */
+        val height: Int = 0
     )
 
     data class ScanResult(

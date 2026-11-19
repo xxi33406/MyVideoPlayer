@@ -53,12 +53,38 @@ internal fun PlayerLifecycleEffects(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // ---- 方向：跟随视频比例，退出复位 ----
-    // 竖屏视频（宽<高）开成横屏会让画面缩成中间一条。rememberPresentationState
-    // 给出当前视频的显示尺寸（dp），解出前为 null——此时保持竖屏不动，
-    // 尺寸到了自然切过去。
+    //
+    // 方向依据的优先级：
+    // 1. **DB 里的宽高**（扫描时提取入库）——进播放页第一帧还没合成就知道方向，
+    //    这是消除「横屏视频先竖屏闪一下」的关键。原来只靠 videoSizeDp（首帧解出），
+    //    时序必然是 进页(竖屏)→首帧→尺寸解出→跳横屏。
+    // 2. videoSizeDp（当前视频首帧的实际显示尺寸）——DB 没存到宽高的旧记录、
+    //    或切集换了不同比例视频时的兜底。
+    // 都没有时保持竖屏不动（等首帧）。
+    //
+    // 注意方向 effect 不能挂任何清理、更不能在这里 stop()：videoSize 从 null 变有值
+    // 会重跑 effect，历史上把 detach/stop 放进它的 onDispose 曾把刚播 1.9 秒的
+    // 播放器直接停掉（「进播放页默认暂停」的根因，见 2026-11-18-playback-resume-retro.md）。
+    val currentVideo by viewModel.currentVideo.collectAsState()
+    val dbIsLandscape = currentVideo?.let { it.width > 0 && it.height > 0 && it.width > it.height } == true
+    val dbIsPortrait = currentVideo?.let { it.width > 0 && it.height > 0 && it.width <= it.height } == true
     val player by viewModel.player.collectAsState()
     val presentation = rememberPresentationState(player ?: return)
     val videoSize = presentation.videoSizeDp
+
+    // 期望方向：DB 明确给了就用 DB；否则等首帧尺寸；首帧也没到就竖屏不动。
+    // 折算成 Int 作为 DisposableEffect 的 key，让「DB 说横屏、首帧没到」这种
+    // 组合不触发多余重跑。
+    val desiredOrientation = when {
+        dbIsLandscape -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        dbIsPortrait -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        videoSize == null -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        else -> if (videoSize.width > videoSize.height) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        }
+    }
 
     // ---- 退出清理：只跑一次 ----
     // 这个 effect 的 key 必须是 Unit。曾经错误地用 videoSize 当 key：视频尺寸解出
@@ -85,14 +111,10 @@ internal fun PlayerLifecycleEffects(
     }
 
     // ---- 方向跟随视频比例 ----
-    // 只设方向，不挂任何清理。videoSizeDp 解出前是 null（宽或高为 0），
-    // 此时保持竖屏等尺寸；从 null 到有值、或切集换了不同比例的视频，
-    // 都靠这个 effect 的重跑来切方向。
-    DisposableEffect(videoSize) {
-        val isLandscapeVideo = (videoSize?.width ?: 0f) > (videoSize?.height ?: 0f)
-        activity.requestedOrientation =
-            if (isLandscapeVideo) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+    // 只设方向，不挂任何清理。key 是算好的期望方向：DB 宽高、首帧尺寸任一变化
+    // 且导致方向翻转时才重跑；方向没变（如同为横屏）不重复设值。
+    DisposableEffect(desiredOrientation) {
+        activity.requestedOrientation = desiredOrientation
         onDispose { }
     }
 

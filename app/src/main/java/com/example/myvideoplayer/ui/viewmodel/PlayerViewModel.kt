@@ -20,8 +20,11 @@ import com.example.myvideoplayer.AppContainer
 import com.example.myvideoplayer.data.entity.VideoEntity
 import com.example.myvideoplayer.playback.PlaybackService
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -86,6 +89,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     // 当前播放索引
     private val _currentIndex = MutableStateFlow(0)
     val currentIndex: StateFlow<Int> = _currentIndex.asStateFlow()
+
+    /**
+     * 当前视频实体（含扫描时入库的宽高）。方向切换直接读 DB 宽高，
+     * 不等首帧解出——否则横屏视频进播放页会先竖屏闪一下。
+     */
+    val currentVideo: StateFlow<VideoEntity?> = combine(_playlist, _currentIndex) { list, idx ->
+        list.getOrNull(idx)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     // 是否正在播放
     private val _isPlaying = MutableStateFlow(false)
